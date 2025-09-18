@@ -59,7 +59,7 @@ class GitHubIOCScanner:
         for pattern in _BASE_LOCKFILE_PATTERNS:
             LOCKFILE_PATTERNS.append(subdir + pattern)
 
-    def __init__(self, config: ScanConfig, github_client: GitHubClient, cache_manager: CacheManager, ioc_loader: Optional[IOCLoader] = None, progress_callback: Optional[callable] = None, batch_config: Optional[BatchConfig] = None, enable_batch_processing: bool = True) -> None:
+    def __init__(self, config: ScanConfig, github_client: GitHubClient, cache_manager: CacheManager, ioc_loader: Optional[IOCLoader] = None, progress_callback: Optional[callable] = None, batch_config: Optional[BatchConfig] = None, enable_batch_processing: bool = False) -> None:
         """Initialize the scanner with configuration and dependencies."""
         self.config = config
         self.github_client = github_client

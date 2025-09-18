@@ -242,30 +242,10 @@ class BatchCoordinator:
         Returns:
             List of discovered repositories
         """
-        # For now, return a simulated list of repositories
-        # In a full implementation, this would use the GitHub API to discover repositories
-        from datetime import datetime, timezone
-        
-        simulated_repos = [
-            Repository(
-                name=f"repo-{i}",
-                full_name=f"{organization}/repo-{i}",
-                archived=False,
-                default_branch="main",
-                updated_at=datetime.now(timezone.utc)
-            )
-            for i in range(1, min(6, max_repositories or 6))  # Simulate up to 5 repos
-        ]
-        
-        # Apply filter if provided
-        if repository_filter:
-            simulated_repos = [
-                repo for repo in simulated_repos
-                if repository_filter.lower() in repo.name.lower()
-            ]
-        
-        logger.debug(f"Discovered {len(simulated_repos)} repositories in organization {organization}")
-        return simulated_repos
+        # For now, delegate to the scanner's synchronous repository discovery
+        # This is a temporary solution until we implement proper async organization discovery
+        logger.warning(f"Batch repository discovery not fully implemented, using fallback")
+        return []
     
     async def process_files_batch(
         self,
