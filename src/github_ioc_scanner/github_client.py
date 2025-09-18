@@ -24,6 +24,7 @@ from .exceptions import (
     get_error_context
 )
 from .logging_config import get_logger, log_exception, log_rate_limit
+from .smart_rate_limiter import handle_smart_rate_limiting, handle_rate_limit_exceeded
 from .models import APIResponse, FileContent, FileInfo, Repository
 from .batch_models import BatchRequest, BatchResult, BatchConfig
 
@@ -56,6 +57,10 @@ class GitHubClient:
         # Async client for batch operations
         self._async_client: Optional[httpx.AsyncClient] = None
         self._async_client_lock = asyncio.Lock()
+        
+        # Code Search API rate limit tracking
+        self._code_search_rate_limited = False
+        self._code_search_reset_time = 0
         
     def _discover_token(self) -> str:
         """Discover GitHub token from environment or gh CLI."""
@@ -114,6 +119,8 @@ class GitHubClient:
             reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
             log_rate_limit(logger, remaining, reset_time)
             
+            # Proactive rate limit handling - slow down when approaching limits
+            handle_smart_rate_limiting(remaining, reset_time)            
             # Handle rate limiting
             if response.status_code == 403:
                 error_message = response.text.lower()
@@ -182,21 +189,7 @@ class GitHubClient:
     
     def _handle_rate_limit(self, reset_time: int) -> None:
         """Handle rate limiting with exponential backoff."""
-        current_time = int(time.time())
-        wait_time = max(reset_time - current_time, 60)  # Wait at least 1 minute
-        
-        logger.warning(f"Rate limit exceeded. Waiting {wait_time} seconds until {datetime.fromtimestamp(reset_time)}")
-        
-        # Use exponential backoff with jitter for additional requests
-        base_wait = min(wait_time, 300)  # Cap at 5 minutes
-        jitter = base_wait * 0.1  # 10% jitter
-        actual_wait = base_wait + (jitter * (0.5 - hash(str(time.time())) % 100 / 100))
-        
-        try:
-            time.sleep(actual_wait)
-        except KeyboardInterrupt:
-            logger.info("Rate limit wait interrupted by user")
-            raise
+        handle_rate_limit_exceeded(reset_time)
 
     def get_organization_repos(
         self, org: str, include_archived: bool = False, etag: Optional[str] = None
@@ -229,6 +222,7 @@ class GitHubClient:
             
             while True:
                 params["page"] = page
+                logger.info(f"Fetching repositories page {page} for organization {org}...")
                 response = self._make_request("GET", url, etag=etag if page == 1 else None, params=params)
                 
                 if response.not_modified and page == 1:
@@ -245,6 +239,7 @@ class GitHubClient:
                     break
                     
                 try:
+                    page_repos = 0
                     for repo_data in repos_data:
                         if not include_archived and repo_data.get("archived", False):
                             continue
@@ -257,6 +252,10 @@ class GitHubClient:
                             updated_at=datetime.fromisoformat(repo_data["updated_at"].replace("Z", "+00:00")),
                         )
                         all_repos.append(repo)
+                        page_repos += 1
+                        
+                    logger.info(f"Page {page}: Found {page_repos} repositories (total: {len(all_repos)})")
+                    
                 except (KeyError, ValueError, TypeError) as e:
                     logger.warning(f"Malformed repository data in organization {org}: {e}")
                     continue
@@ -277,11 +276,56 @@ class GitHubClient:
                 rate_limit_reset=response.rate_limit_reset,
             )
             
+        except RateLimitError as e:
+            # Handle rate limit gracefully - wait and retry once
+            logger.warning(f"🚨 Rate limit hit while fetching repositories for {org}: {e}")
+            self._handle_rate_limit(e.reset_time if hasattr(e, 'reset_time') else int(time.time()) + 3600)
+            
+            # Retry once after waiting
+            try:
+                logger.info(f"🔄 Retrying repository fetch for {org} after rate limit wait...")
+                response = self._make_request("GET", url, etag=etag, params={"type": "all", "per_page": 100, "sort": "updated", "page": 1})
+                
+                if response.data:
+                    # Process first page only for retry
+                    repos_data = response.data
+                    all_repos = []
+                    
+                    for repo_data in repos_data:
+                        if not include_archived and repo_data.get("archived", False):
+                            continue
+                            
+                        repo = Repository(
+                            name=repo_data["name"],
+                            full_name=repo_data["full_name"],
+                            archived=repo_data.get("archived", False),
+                            default_branch=repo_data.get("default_branch", "main"),
+                            updated_at=datetime.fromisoformat(repo_data["updated_at"].replace("Z", "+00:00")),
+                        )
+                        all_repos.append(repo)
+                    
+                    logger.info(f"✅ Successfully retrieved {len(all_repos)} repositories for {org} after retry")
+                    
+                    return APIResponse(
+                        data=all_repos,
+                        etag=response.etag,
+                        not_modified=False,
+                        rate_limit_remaining=response.rate_limit_remaining,
+                        rate_limit_reset=response.rate_limit_reset,
+                    )
+                else:
+                    logger.warning(f"⚠️  No repositories found for {org} after retry")
+                    return APIResponse(data=[])
+                    
+            except Exception as retry_e:
+                logger.error(f"❌ Retry failed for {org}: {retry_e}")
+                return APIResponse(data=[])  # Return empty instead of crashing
+                
         except (OrganizationNotFoundError, AuthenticationError, NetworkError):
             raise
         except Exception as e:
             log_exception(logger, f"Failed to get repositories for organization {org}", e)
-            raise wrap_exception(e, f"Failed to get repositories for organization {org}")
+            return APIResponse(data=[])  # Return empty instead of crashing
 
     def get_team_repos(
         self, org: str, team: str, etag: Optional[str] = None
@@ -356,11 +400,16 @@ class GitHubClient:
                 rate_limit_reset=response.rate_limit_reset,
             )
             
+        except RateLimitError as e:
+            # Handle rate limit gracefully for team repos
+            logger.warning(f"🚨 Rate limit hit while fetching team repositories for {org}/{team}: {e}")
+            self._handle_rate_limit(e.reset_time if hasattr(e, 'reset_time') else int(time.time()) + 3600)
+            return APIResponse(data=[])  # Return empty instead of crashing
         except (TeamNotFoundError, OrganizationNotFoundError, AuthenticationError, NetworkError):
             raise
         except Exception as e:
             log_exception(logger, f"Failed to get repositories for team {org}/{team}", e)
-            raise wrap_exception(e, f"Failed to get repositories for team {org}/{team}")
+            return APIResponse(data=[])  # Return empty instead of crashing
 
     def search_files(self, repo: Repository, patterns: List[str], fast_mode: bool = False) -> List[FileInfo]:
         """Search for files matching patterns in a repository using Code Search API with Tree API fallback.
@@ -380,26 +429,22 @@ class GitHubClient:
         try:
             files = []
             
-            # Try Code Search API first
-            try:
-                files = self._search_files_code_api(repo, patterns)
-                if files:
-                    logger.debug(f"Found {len(files)} files using Code Search API in {repo.full_name}")
-                    return files
-            except (NetworkError, AuthenticationError):
-                raise
-            except Exception as e:
-                logger.warning(f"Code Search API failed for {repo.full_name}: {e}")
-            
-            # Fallback to Tree API if Code Search fails or returns no results
-            logger.debug(f"Falling back to Tree API for {repo.full_name}")
+            # For large team scans, use Tree API first to avoid Code Search rate limits
+            # This is much more efficient for scanning many repositories
+            logger.debug(f"Using Tree API for {repo.full_name} (optimized for large scans)")
             return self._search_files_tree_api(repo, patterns, fast_mode)
             
+        except RateLimitError as e:
+            # Rate limit errors should be handled gracefully
+            logger.warning(f"File search rate limited for {repo.full_name}: {e}")
+            # Trigger rate limit handling
+            self._handle_rate_limit(e.reset_time if hasattr(e, 'reset_time') else int(time.time()) + 3600)
+            return []  # Return empty list instead of crashing
         except (RepositoryNotFoundError, NetworkError, AuthenticationError):
             raise
         except Exception as e:
             log_exception(logger, f"Failed to search files in repository {repo.full_name}", e)
-            raise wrap_exception(e, f"Failed to search files in repository {repo.full_name}")
+            return []  # Return empty list instead of crashing to continue with other repos
 
     def _search_files_code_api(self, repo: Repository, patterns: List[str]) -> List[FileInfo]:
         """Search for files using GitHub Code Search API."""
@@ -407,7 +452,7 @@ class GitHubClient:
         
         try:
             for pattern in patterns:
-                # Use GitHub Code Search API
+                # Use GitHub Code Search API (has separate rate limits: 30 req/min)
                 url = "/search/code"
                 params = {
                     "q": f"filename:{pattern} repo:{repo.full_name}",
@@ -417,6 +462,11 @@ class GitHubClient:
                 page = 1
                 while True:
                     params["page"] = page
+                    
+                    # Add extra delay for Code Search API due to lower limits
+                    if page > 1:
+                        time.sleep(2)  # 2 second delay between pages
+                    
                     response = self._make_request("GET", url, params=params)
                     
                     if not response.data:
@@ -450,7 +500,7 @@ class GitHubClient:
             
         except RateLimitError as e:
             # Rate limit errors are expected and handled gracefully
-            logger.warning(f"Code Search API failed for {repo.full_name}: {e}")
+            logger.warning(f"Code Search API rate limited for {repo.full_name}: {e}")
             raise
         except Exception as e:
             log_exception(logger, f"Code Search API error for {repo.full_name}", e)
@@ -486,9 +536,15 @@ class GitHubClient:
             
             return matching_files
             
+        except RateLimitError as e:
+            # Rate limit errors should be handled gracefully
+            logger.warning(f"Tree API rate limited for {repo.full_name}: {e}")
+            # Trigger rate limit handling
+            self._handle_rate_limit(e.reset_time if hasattr(e, 'reset_time') else int(time.time()) + 3600)
+            return []  # Return empty list instead of crashing
         except Exception as e:
             log_exception(logger, f"Tree API error for {repo.full_name}", e)
-            raise
+            return []  # Return empty list instead of crashing
 
     def _matches_pattern(self, filename: str, pattern: str) -> bool:
         """Check if a filename matches a pattern."""
@@ -897,6 +953,8 @@ class GitHubClient:
             reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
             log_rate_limit(logger, remaining, reset_time)
             
+            # Proactive rate limit handling - slow down when approaching limits
+            handle_smart_rate_limiting(remaining, reset_time)            
             # Handle rate limiting
             if response.status_code == 403:
                 error_message = response.text.lower()
@@ -966,6 +1024,64 @@ class GitHubClient:
     def close(self) -> None:
         """Close the HTTP client."""
         self.client.close()
+
+    def get_sbom(self, repo: Repository) -> Optional[str]:
+        """Download SBOM (Software Bill of Materials) from GitHub Dependency Graph API.
+        
+        Args:
+            repo: Repository to get SBOM for
+            
+        Returns:
+            SBOM content as JSON string, or None if not available
+            
+        Raises:
+            RepositoryNotFoundError: If the repository doesn't exist
+            NetworkError: If network operations fail
+        """
+        try:
+            url = f"/repos/{quote(repo.full_name)}/dependency-graph/sbom"
+            
+            # Use specific Accept header for SBOM API
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28"
+            }
+            
+            response = self._make_request("GET", url, headers=headers)
+            
+            if not response.data:
+                logger.debug(f"No SBOM available for {repo.full_name}")
+                return None
+            
+            # The SBOM API returns the SBOM directly as JSON
+            sbom_data = response.data
+            
+            if isinstance(sbom_data, dict):
+                # Convert to JSON string for consistent handling
+                import json
+                return json.dumps(sbom_data)
+            elif isinstance(sbom_data, str):
+                return sbom_data
+            else:
+                logger.warning(f"Unexpected SBOM data format for {repo.full_name}: {type(sbom_data)}")
+                return None
+                
+        except RateLimitError as e:
+            logger.warning(f"Rate limit hit while fetching SBOM for {repo.full_name}: {e}")
+            raise
+        except APIError as e:
+            if e.status_code == 404:
+                logger.debug(f"SBOM not available for {repo.full_name} (404)")
+                return None
+            elif e.status_code == 403:
+                logger.warning(f"Access denied for SBOM in {repo.full_name} (403)")
+                return None
+            else:
+                logger.warning(f"API error fetching SBOM for {repo.full_name}: {e}")
+                return None
+        except Exception as e:
+            logger.warning(f"Failed to fetch SBOM for {repo.full_name}: {e}")
+            return None
 
     async def aclose(self) -> None:
         """Close the async HTTP client."""

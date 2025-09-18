@@ -20,7 +20,7 @@ from .exceptions import (
 from .github_client import GitHubClient
 from .ioc_loader import IOCLoader
 from .logging_config import get_logger, log_exception, log_performance
-from .models import ScanConfig, ScanResults, Repository, IOCMatch, CacheStats, FileContent, FileInfo
+from .models import ScanConfig, ScanResults, Repository, IOCMatch, CacheStats, FileContent, FileInfo, PackageDependency
 from .parsers.factory import get_parser, parse_file_safely
 # Import parsers module to ensure all parsers are registered
 from . import parsers
@@ -50,6 +50,24 @@ class GitHubIOCScanner:
         "Cargo.lock",
     ]
     
+    # SBOM file patterns
+    _SBOM_PATTERNS = [
+        "sbom.json",
+        "bom.json", 
+        "cyclonedx.json",
+        "spdx.json",
+        "sbom.xml",
+        "bom.xml",
+        "cyclonedx.xml",
+        "spdx.xml",
+        "software-bill-of-materials.json",
+        "software-bill-of-materials.xml",
+        ".sbom",
+        ".spdx",
+        "SBOM.json",
+        "BOM.json"
+    ]
+    
     # Common subdirectories to check
     _COMMON_SUBDIRS = ['', 'frontend/', 'backend/', 'client/', 'server/', 'web/', 'api/', 'app/', 'src/', 'cdk/']
     
@@ -58,8 +76,17 @@ class GitHubIOCScanner:
     for subdir in _COMMON_SUBDIRS:
         for pattern in _BASE_LOCKFILE_PATTERNS:
             LOCKFILE_PATTERNS.append(subdir + pattern)
+    
+    # Generate SBOM patterns with subdirectories
+    SBOM_PATTERNS = []
+    for subdir in _COMMON_SUBDIRS:
+        for pattern in _SBOM_PATTERNS:
+            SBOM_PATTERNS.append(subdir + pattern)
+    
+    # Combined patterns for comprehensive scanning
+    ALL_PATTERNS = LOCKFILE_PATTERNS + SBOM_PATTERNS
 
-    def __init__(self, config: ScanConfig, github_client: GitHubClient, cache_manager: CacheManager, ioc_loader: Optional[IOCLoader] = None, progress_callback: Optional[callable] = None, batch_config: Optional[BatchConfig] = None, enable_batch_processing: bool = False) -> None:
+    def __init__(self, config: ScanConfig, github_client: GitHubClient, cache_manager: CacheManager, ioc_loader: Optional[IOCLoader] = None, progress_callback: Optional[callable] = None, batch_config: Optional[BatchConfig] = None, enable_batch_processing: bool = False, enable_sbom_scanning: bool = True) -> None:
         """Initialize the scanner with configuration and dependencies."""
         self.config = config
         self.github_client = github_client
@@ -67,6 +94,7 @@ class GitHubIOCScanner:
         self.ioc_loader = ioc_loader or IOCLoader(config.issues_dir)
         self.progress_callback = progress_callback
         self.enable_batch_processing = enable_batch_processing
+        self.enable_sbom_scanning = enable_sbom_scanning
         
         # Initialize batch processing components if enabled
         self.batch_coordinator: Optional[BatchCoordinator] = None
@@ -89,6 +117,15 @@ class GitHubIOCScanner:
             # Configure progress monitoring if callback is provided
             if self.progress_callback:
                 self._setup_batch_progress_monitoring()
+    
+    def _get_scan_patterns(self) -> List[str]:
+        """Get file patterns to scan based on configuration."""
+        patterns = self.LOCKFILE_PATTERNS.copy()
+        
+        if self.enable_sbom_scanning:
+            patterns.extend(self.SBOM_PATTERNS)
+            
+        return patterns
 
     def scan(self) -> ScanResults:
         """Execute the scan based on the configuration."""
@@ -136,10 +173,11 @@ class GitHubIOCScanner:
                     )
                 
                 # Execute batch scanning workflow with progress monitoring
+                file_patterns = self._get_scan_patterns()
                 batch_results = await self.batch_coordinator.process_repositories_batch(
                     repositories, 
                     strategy=self._select_batch_strategy(repositories),
-                    file_patterns=self.LOCKFILE_PATTERNS
+                    file_patterns=file_patterns
                 )
                 
                 # Convert batch results to IOC matches
@@ -346,8 +384,13 @@ class GitHubIOCScanner:
         
         # Filter archived repositories if not included
         if not self.config.include_archived:
+            original_count = len(repositories)
             repositories = [repo for repo in repositories if not repo.archived]
-            logger.debug(f"Filtered to {len(repositories)} non-archived repositories")
+            archived_count = original_count - len(repositories)
+            if archived_count > 0:
+                logger.info(f"📦 Excluded {archived_count} archived repositories, scanning {len(repositories)} active repositories")
+            else:
+                logger.debug(f"All {len(repositories)} repositories are active (no archived repos found)")
         
         return repositories
     
@@ -410,6 +453,16 @@ class GitHubIOCScanner:
         else:
             logger.warning(f"No repositories found for team {org}/{team}")
             return []
+        
+        # Filter archived repositories if not included (same as organization discovery)
+        if not self.config.include_archived:
+            original_count = len(repositories)
+            repositories = [repo for repo in repositories if not repo.archived]
+            archived_count = original_count - len(repositories)
+            if archived_count > 0:
+                logger.info(f"📦 Excluded {archived_count} archived repositories from team {org}/{team}, scanning {len(repositories)} active repositories")
+            else:
+                logger.debug(f"All {len(repositories)} repositories in team {org}/{team} are active (no archived repos found)")
         
         return repositories
     
@@ -561,14 +614,43 @@ class GitHubIOCScanner:
             Tuple of (IOC matches found, number of files scanned)
         """
         try:
-            # Discover relevant files in the repository
+            # Check if SBOM-only mode is enabled
+            if hasattr(self.config, 'sbom_only') and self.config.sbom_only:
+                return self.scan_sbom_files(repo, ioc_hash)
+            
+            # Check if SBOM scanning is disabled
+            if hasattr(self.config, 'disable_sbom') and self.config.disable_sbom:
+                return self._scan_lockfiles_only(repo, ioc_hash)
+            
+            # Default: scan both lockfiles and SBOM files
+            if self.enable_sbom_scanning:
+                return self.scan_combined_files_for_iocs(repo, ioc_hash)
+            else:
+                return self._scan_lockfiles_only(repo, ioc_hash)
+            
+        except Exception as e:
+            logger.error(f"Failed to scan repository {repo.full_name}: {e}")
+            return [], 0
+    
+    def _scan_lockfiles_only(self, repo: Repository, ioc_hash: str) -> tuple[List[IOCMatch], int]:
+        """Scan only traditional lockfiles in a repository for IOC matches.
+        
+        Args:
+            repo: Repository to scan
+            ioc_hash: Hash of IOC definitions for cache invalidation
+            
+        Returns:
+            Tuple of (IOC matches found, number of files scanned)
+        """
+        try:
+            # Discover relevant lockfiles in the repository
             file_paths = self.discover_files_in_repository(repo)
             
             if not file_paths:
-                logger.debug(f"No relevant files found in {repo.full_name}")
+                logger.debug(f"No relevant lockfiles found in {repo.full_name}")
                 return [], 0
             
-            logger.debug(f"Found {len(file_paths)} files to scan in {repo.full_name}")
+            logger.debug(f"Found {len(file_paths)} lockfiles to scan in {repo.full_name}")
             
             all_matches = []
             files_scanned = 0
@@ -589,7 +671,7 @@ class GitHubIOCScanner:
             return all_matches, files_scanned
             
         except Exception as e:
-            logger.error(f"Failed to scan repository {repo.full_name}: {e}")
+            logger.error(f"Failed to scan lockfiles in repository {repo.full_name}: {e}")
             return [], 0
 
     def scan_file_for_iocs(self, repo: Repository, file_path: str, ioc_hash: str) -> List[IOCMatch]:
@@ -655,6 +737,11 @@ class GitHubIOCScanner:
             FileContent object if successful, None otherwise
         """
         try:
+            # Check if this is an API SBOM file
+            if file_path.startswith("__github_api_sbom__"):
+                return self._fetch_api_sbom_content(repo, file_path)
+            
+            # Regular file handling
             # Check if we have cached content first
             # We need the SHA to check cache, so we'll get it from the API response
             
@@ -1241,4 +1328,326 @@ class GitHubIOCScanner:
         # Configure the batch coordinator's progress monitor with our callback
         self.batch_coordinator.progress_monitor.progress_callback = batch_progress_callback
         
-        logger.debug("Batch progress monitoring configured with CLI integration")
+        logger.debug("Batch progress monitoring configured with CLI integration") 
+   
+    # SBOM-specific scanning methods
+    
+    def scan_sbom_files(self, repo: Repository, ioc_hash: str) -> tuple[List[IOCMatch], int]:
+        """Scan SBOM files in a repository for IOC matches.
+        
+        Args:
+            repo: Repository to scan
+            ioc_hash: Hash of IOC definitions for cache invalidation
+            
+        Returns:
+            Tuple of (IOC matches found, number of SBOM files scanned)
+        """
+        try:
+            # Discover SBOM files in the repository
+            sbom_files = self.discover_sbom_files_in_repository(repo)
+            
+            if not sbom_files:
+                logger.debug(f"No SBOM files found in {repo.full_name}")
+                return [], 0
+            
+            logger.debug(f"Found {len(sbom_files)} SBOM files to scan in {repo.full_name}")
+            
+            all_matches = []
+            files_scanned = 0
+            
+            for file_path in sbom_files:
+                try:
+                    matches = self.scan_sbom_file_for_iocs(repo, file_path, ioc_hash)
+                    all_matches.extend(matches)
+                    files_scanned += 1
+                    
+                    if matches:
+                        logger.debug(f"Found {len(matches)} IOC matches in SBOM {repo.full_name}/{file_path}")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to scan SBOM file {repo.full_name}/{file_path}: {e}")
+                    continue
+            
+            return all_matches, files_scanned
+            
+        except Exception as e:
+            logger.error(f"Failed to scan SBOM files in repository {repo.full_name}: {e}")
+            return [], 0
+    
+    def discover_sbom_files_in_repository(self, repo: Repository) -> List[str]:
+        """Discover SBOM files in a repository (both in-repo files and GitHub API SBOM)."""
+        logger.debug(f"Discovering SBOM files in repository: {repo.full_name}")
+        
+        file_paths = []
+        
+        try:
+            # 1. Search for SBOM files in the repository
+            files = self.github_client.search_files(
+                repo, 
+                self.SBOM_PATTERNS, 
+                fast_mode=self.config.fast_mode
+            )
+            
+            repo_sbom_paths = [f.path for f in files]
+            file_paths.extend(repo_sbom_paths)
+            
+            if repo_sbom_paths:
+                logger.debug(f"Found {len(repo_sbom_paths)} SBOM files in repository: {repo_sbom_paths}")
+            
+            # 2. Try to get SBOM from GitHub Dependency Graph API
+            try:
+                sbom_content = self.github_client.get_sbom(repo)
+                if sbom_content:
+                    # Use a special path to indicate this is from the API
+                    api_sbom_path = f"__github_api_sbom__.json"
+                    file_paths.append(api_sbom_path)
+                    
+                    # Cache the SBOM content for later retrieval
+                    self._cache_api_sbom(repo, api_sbom_path, sbom_content)
+                    
+                    logger.debug(f"Downloaded SBOM from GitHub API for {repo.full_name}")
+                else:
+                    logger.debug(f"No SBOM available via GitHub API for {repo.full_name}")
+                    
+            except Exception as e:
+                logger.debug(f"Could not fetch SBOM via GitHub API for {repo.full_name}: {e}")
+            
+            logger.debug(f"Found {len(file_paths)} total SBOM sources in {repo.full_name}")
+            return file_paths
+            
+        except Exception as e:
+            logger.error(f"Failed to discover SBOM files in {repo.full_name}: {e}")
+            return []
+    
+    async def discover_sbom_files_in_repository_batch(self, repo: Repository) -> List[str]:
+        """Discover SBOM files in a repository using batch processing."""
+        logger.debug(f"Batch discovering SBOM files in repository: {repo.full_name}")
+        
+        if not self.batch_coordinator:
+            # Fallback to sequential discovery
+            return self.discover_sbom_files_in_repository(repo)
+        
+        try:
+            # Use batch coordinator for SBOM file discovery
+            files = await self.batch_coordinator._discover_repository_files(repo, self.SBOM_PATTERNS)
+            
+            logger.debug(f"Batch found {len(files)} SBOM files in {repo.full_name}")
+            
+            return files
+            
+        except Exception as e:
+            logger.warning(f"Batch SBOM file discovery failed, falling back to sequential: {e}")
+            return self.discover_sbom_files_in_repository(repo)
+    
+    def scan_sbom_file_for_iocs(self, repo: Repository, file_path: str, ioc_hash: str) -> List[IOCMatch]:
+        """Scan a single SBOM file for IOC matches with caching.
+        
+        Args:
+            repo: Repository containing the SBOM file
+            file_path: Path to the SBOM file within the repository
+            ioc_hash: Hash of IOC definitions for cache invalidation
+            
+        Returns:
+            List of IOC matches found in the SBOM file
+        """
+        try:
+            # First, get file content with ETag conditional requests
+            file_content = self.fetch_file_content_with_cache(repo, file_path)
+            
+            if not file_content:
+                logger.debug(f"Could not fetch SBOM content for {repo.full_name}/{file_path}")
+                return []
+            
+            # Check cache for SBOM scan results first
+            cache_key = f"sbom:{repo.full_name}:{file_path}"
+            cached_results = self.cache_manager.get_scan_results(
+                cache_key, file_path, file_content.sha, ioc_hash
+            )
+            
+            if cached_results is not None:
+                logger.debug(f"Using cached SBOM scan results for {repo.full_name}/{file_path}")
+                return cached_results
+            
+            # Parse packages from SBOM content
+            packages = self.parse_sbom_packages_with_cache(repo, file_path, file_content)
+            
+            if not packages:
+                # Cache empty results to avoid re-parsing
+                self.cache_manager.store_scan_results(
+                    cache_key, file_path, file_content.sha, ioc_hash, []
+                )
+                return []
+            
+            # Match packages against IOC definitions
+            matches = self.match_packages_against_iocs(repo, file_path, packages)
+            
+            # Cache the SBOM scan results
+            self.cache_manager.store_scan_results(
+                cache_key, file_path, file_content.sha, ioc_hash, matches
+            )
+            
+            return matches
+            
+        except Exception as e:
+            logger.warning(f"Error scanning SBOM file {repo.full_name}/{file_path}: {e}")
+            return []
+    
+    def parse_sbom_packages_with_cache(self, repo: Repository, file_path: str, file_content: FileContent) -> List[PackageDependency]:
+        """Parse packages from SBOM file content with caching.
+        
+        Args:
+            repo: Repository containing the file
+            file_path: Path to the file within the repository
+            file_content: File content object
+            
+        Returns:
+            List of Package objects parsed from the SBOM
+        """
+        try:
+            # Check cache for parsed packages first
+            cache_key = f"sbom_packages:{repo.full_name}:{file_path}"
+            cached_packages = self.cache_manager.get_parsed_packages(cache_key, file_path, file_content.sha)
+            
+            if cached_packages is not None:
+                logger.debug(f"Using cached SBOM packages for {repo.full_name}/{file_path}")
+                return cached_packages
+            
+            # Parse SBOM file using SBOM parser
+            from .parsers.sbom import SBOMParser
+            parser = SBOMParser()
+            
+            if not parser.can_parse(file_path):
+                logger.debug(f"File {file_path} is not recognized as an SBOM file")
+                return []
+            
+            packages = parser.parse(file_content.content, file_path)
+            
+            # Cache the parsed packages
+            self.cache_manager.store_parsed_packages(cache_key, file_path, file_content.sha, packages)
+            
+            logger.debug(f"Parsed {len(packages)} packages from SBOM {repo.full_name}/{file_path}")
+            
+            return packages
+            
+        except Exception as e:
+            logger.warning(f"Error parsing SBOM packages from {repo.full_name}/{file_path}: {e}")
+            return []
+    
+    def scan_combined_files_for_iocs(self, repo: Repository, ioc_hash: str) -> tuple[List[IOCMatch], int]:
+        """Scan both lockfiles and SBOM files in a repository for IOC matches.
+        
+        Args:
+            repo: Repository to scan
+            ioc_hash: Hash of IOC definitions for cache invalidation
+            
+        Returns:
+            Tuple of (IOC matches found, number of files scanned)
+        """
+        try:
+            all_matches = []
+            total_files_scanned = 0
+            
+            # Scan traditional lockfiles
+            lockfile_matches, lockfiles_scanned = self._scan_lockfiles_only(repo, ioc_hash)
+            all_matches.extend(lockfile_matches)
+            total_files_scanned += lockfiles_scanned
+            
+            # Scan SBOM files if enabled
+            if self.enable_sbom_scanning:
+                sbom_matches, sbom_files_scanned = self.scan_sbom_files(repo, ioc_hash)
+                all_matches.extend(sbom_matches)
+                total_files_scanned += sbom_files_scanned
+                
+                logger.debug(f"Combined scan of {repo.full_name}: "
+                           f"{lockfiles_scanned} lockfiles + {sbom_files_scanned} SBOM files = "
+                           f"{total_files_scanned} total files, {len(all_matches)} matches")
+            
+            return all_matches, total_files_scanned
+            
+        except Exception as e:
+            logger.error(f"Failed to scan combined files in repository {repo.full_name}: {e}")
+            return [], 0
+    
+    def get_sbom_scan_statistics(self) -> Dict[str, Any]:
+        """Get statistics about SBOM scanning from cache."""
+        try:
+            cache_stats = self.cache_manager.get_cache_stats()
+            
+            # Extract SBOM-specific statistics
+            sbom_stats = {
+                'sbom_files_cached': 0,
+                'sbom_packages_cached': 0,
+                'sbom_scan_results_cached': 0,
+                'sbom_cache_hit_rate': 0.0
+            }
+            
+            # Count SBOM-related cache entries
+            if hasattr(cache_stats, 'cache_entries'):
+                for key in cache_stats.cache_entries:
+                    if key.startswith('sbom:'):
+                        if 'packages' in key:
+                            sbom_stats['sbom_packages_cached'] += 1
+                        else:
+                            sbom_stats['sbom_scan_results_cached'] += 1
+            
+            return sbom_stats
+            
+        except Exception as e:
+            logger.warning(f"Failed to get SBOM scan statistics: {e}")
+            return {}
+    
+    def _cache_api_sbom(self, repo: Repository, sbom_path: str, sbom_content: str) -> None:
+        """Cache SBOM content downloaded from GitHub API."""
+        try:
+            # Store in a simple in-memory cache for this scan session
+            if not hasattr(self, '_api_sbom_cache'):
+                self._api_sbom_cache = {}
+            
+            cache_key = f"{repo.full_name}:{sbom_path}"
+            self._api_sbom_cache[cache_key] = sbom_content
+            
+            logger.debug(f"Cached API SBOM for {repo.full_name}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to cache API SBOM for {repo.full_name}: {e}")
+    
+    def _get_cached_api_sbom(self, repo: Repository, sbom_path: str) -> Optional[str]:
+        """Retrieve cached SBOM content from GitHub API."""
+        try:
+            if not hasattr(self, '_api_sbom_cache'):
+                return None
+            
+            cache_key = f"{repo.full_name}:{sbom_path}"
+            return self._api_sbom_cache.get(cache_key)
+            
+        except Exception as e:
+            logger.warning(f"Failed to retrieve cached API SBOM for {repo.full_name}: {e}")
+            return None
+    
+    def _fetch_api_sbom_content(self, repo: Repository, sbom_path: str) -> Optional[FileContent]:
+        """Fetch SBOM content from cached API download."""
+        try:
+            # Get cached SBOM content
+            sbom_content = self._get_cached_api_sbom(repo, sbom_path)
+            
+            if not sbom_content:
+                logger.debug(f"No cached API SBOM content for {repo.full_name}")
+                return None
+            
+            # Create a FileContent object for the API SBOM
+            # Use a hash of the content as SHA since we don't have a real git SHA
+            import hashlib
+            content_hash = hashlib.sha256(sbom_content.encode('utf-8')).hexdigest()
+            
+            file_content = FileContent(
+                content=sbom_content,
+                sha=content_hash,
+                size=len(sbom_content)
+            )
+            
+            logger.debug(f"Retrieved API SBOM content for {repo.full_name} ({len(sbom_content)} bytes)")
+            return file_content
+            
+        except Exception as e:
+            logger.warning(f"Failed to fetch API SBOM content for {repo.full_name}: {e}")
+            return None

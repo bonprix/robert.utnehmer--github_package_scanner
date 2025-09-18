@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "github-ioc-scanner"
-version = "1.0.9"
+version = "1.2.0"
 description = "Scan GitHub repositories for Indicators of Compromise (IOCs) in package dependencies across multiple languages"
 authors = [{name = "GitHub IOC Scanner Contributors", email = "security@example.com"}]
 license = {text = "MIT"}
@@ -36,11 +36,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/github-ioc-scanner"
-Documentation = "https://github.com/your-org/github-ioc-scanner/tree/main/docs"
-Repository = "https://github.com/your-org/github-ioc-scanner"
-Issues = "https://github.com/your-org/github-ioc-scanner/issues"
-Changelog = "https://github.com/your-org/github-ioc-scanner/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/christianherweg0807/github_package_scanner"
+Documentation = "https://github.com/christianherweg0807/github_package_scanner/tree/main/docs"
+Repository = "https://github.com/christianherweg0807/github_package_scanner"
+Issues = "https://github.com/christianherweg0807/github_package_scanner/issues"
+Changelog = "https://github.com/christianherweg0807/github_package_scanner/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

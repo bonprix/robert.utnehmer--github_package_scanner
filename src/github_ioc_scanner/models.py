@@ -13,7 +13,11 @@ class ScanConfig:
     repo: Optional[str] = None
     fast_mode: bool = False
     include_archived: bool = False
-    issues_dir: str = "issues"
+    issues_dir: Optional[str] = "issues"
+    # SBOM scanning options
+    enable_sbom: bool = True
+    disable_sbom: bool = False
+    sbom_only: bool = False
     # Cache management options
     clear_cache: bool = False
     clear_cache_type: Optional[str] = None
