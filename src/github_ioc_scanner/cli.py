@@ -142,9 +142,9 @@ Authentication:
         parser.add_argument(
             "--issues-dir",
             type=str,
-            default="issues",
+            default=None,
             metavar="DIRECTORY",
-            help="Directory containing IOC definition files (default: issues)",
+            help="Directory containing IOC definition files (default: built-in IOCs)",
         )
 
         # Cache management options
