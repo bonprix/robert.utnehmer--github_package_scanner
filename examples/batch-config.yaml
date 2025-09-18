@@ -1,0 +1,28 @@
+# Batch Processing Configuration for GitHub IOC Scanner
+
+# Concurrency settings
+max_concurrent_requests: 15
+max_concurrent_repos: 5
+
+# Batch size settings
+default_batch_size: 20
+max_batch_size: 100
+min_batch_size: 2
+
+# Performance settings
+rate_limit_buffer: 0.85  # Use 85% of available rate limit
+retry_attempts: 4
+retry_delay_base: 1.5
+
+# Memory settings
+max_memory_usage_mb: 1024
+stream_large_files_threshold: 2097152  # 2MB
+
+# Strategy settings
+default_strategy: "adaptive"  # Options: sequential, parallel, adaptive, aggressive, conservative
+enable_cross_repo_batching: true
+enable_file_prioritization: true
+
+# Monitoring settings
+enable_performance_monitoring: true
+log_batch_metrics: false

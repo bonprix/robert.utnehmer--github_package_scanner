@@ -1,0 +1,17 @@
+{
+  "max_concurrent_requests": 15,
+  "max_concurrent_repos": 5,
+  "default_batch_size": 20,
+  "max_batch_size": 100,
+  "min_batch_size": 2,
+  "rate_limit_buffer": 0.85,
+  "retry_attempts": 4,
+  "retry_delay_base": 1.5,
+  "max_memory_usage_mb": 1024,
+  "stream_large_files_threshold": 2097152,
+  "default_strategy": "adaptive",
+  "enable_cross_repo_batching": true,
+  "enable_file_prioritization": true,
+  "enable_performance_monitoring": true,
+  "log_batch_metrics": false
+}
