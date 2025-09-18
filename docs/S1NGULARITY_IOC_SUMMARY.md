@@ -2,7 +2,7 @@
 
 ## Overview
 
-Successfully created and tested IOC definitions for the S1ngularity/NX supply chain attack that occurred in September 2024. This attack involved compromising numerous npm packages with malicious code including a first-of-its-kind worm payload.
+Successfully created and tested IOC definitions for the S1ngularity/NX supply chain attack that occurred in September 2025. This attack involved compromising numerous npm packages with malicious code including a first-of-its-kind worm payload.
 
 ## IOC File Created
 
@@ -10,7 +10,7 @@ Successfully created and tested IOC definitions for the S1ngularity/NX supply ch
 
 ### Attack Details
 - **Source**: https://www.aikido.dev/blog/s1ngularity-nx-attackers-strike-again
-- **Date**: September 16, 2024
+- **Date**: September 16, 2025
 - **Attack Type**: Supply chain attack with worm payload
 - **Total Packages**: 147 malicious packages identified
 
@@ -241,7 +241,7 @@ github-ioc-scan --org mycompany --repo critical-app
 ---
 
 **Status**: ✅ **COMPLETE, TESTED, AND READY FOR PRODUCTION**
-**Threat Coverage**: S1ngularity/NX Attack (September 2024)
+**Threat Coverage**: S1ngularity/NX Attack (September 2025)
 **Package Ecosystems**: JavaScript/npm, Python/pip, Ruby, PHP, Go, Rust
 **Total IOCs**: 147 malicious packages identified and catalogued
 **CLI Status**: Fully implemented and functional
