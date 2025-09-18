@@ -1,6 +1,6 @@
 """GitHub IOC Scanner - A tool to scan GitHub repositories for compromised packages."""
 
-__version__ = "1.0.6"
+__version__ = "1.0.7"
 
 from .ioc_loader import IOCLoader, IOCLoaderError, IOCDirectoryNotFoundError, IOCFileError
 from .models import (

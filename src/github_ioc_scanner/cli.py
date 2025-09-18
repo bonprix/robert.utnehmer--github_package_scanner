@@ -660,7 +660,7 @@ Authentication:
             scan_config.append("Excluding archived repositories")
         
         print(f"Configuration: {', '.join(scan_config)}")
-        print(f"IOC Database: {total_iocs:,} threat indicators loaded")
+        print(f"IOC Database: {total_iocs:,} threat indicators loaded (incl. Heise-reported npm attacks)")
         print(f"Scan initiated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("-" * 60)
 
