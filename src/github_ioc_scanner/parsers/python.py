@@ -75,6 +75,10 @@ class RequirementsTxtParser(PackageParser):
                     ))
                 continue
             
+            # Skip known non-PyPI dependency formats silently
+            if self._is_non_pypi_dependency(line):
+                continue
+                
             # Parse regular package specifications
             try:
                 package_dep = self._parse_requirement_line(line)
@@ -88,6 +92,44 @@ class RequirementsTxtParser(PackageParser):
         
         return dependencies
     
+    def _is_non_pypi_dependency(self, line: str) -> bool:
+        """
+        Check if a line contains a non-PyPI dependency that should be skipped silently.
+        
+        This includes:
+        - Git SSH URLs: git+ssh://git@github.com/...
+        - Git HTTPS URLs: git+https://github.com/...
+        - Local paths: ./src, ../lib, /absolute/path
+        - File URLs: file://...
+        """
+        line = line.strip()
+        
+        # Git SSH URLs
+        if line.startswith('git+ssh://'):
+            return True
+            
+        # Git HTTPS URLs  
+        if line.startswith('git+https://'):
+            return True
+            
+        # Local relative paths
+        if line.startswith('./') or line.startswith('../'):
+            return True
+            
+        # Absolute local paths (Unix/Linux)
+        if line.startswith('/'):
+            return True
+            
+        # Windows absolute paths
+        if len(line) >= 3 and line[1:3] == ':\\':
+            return True
+            
+        # File URLs
+        if line.startswith('file://'):
+            return True
+            
+        return False
+
     def _parse_requirement_line(self, line: str) -> Optional[PackageDependency]:
         """
         Parse a single requirement line.
