@@ -23,13 +23,21 @@ logger = get_logger(__name__)
 class IOCLoader:
     """Loads IOC definitions from Python files in the issues directory."""
     
-    def __init__(self, issues_dir: str = "issues"):
+    def __init__(self, issues_dir: Optional[str] = None):
         """Initialize the IOC loader.
         
         Args:
-            issues_dir: Path to the directory containing IOC definition files
+            issues_dir: Path to the directory containing IOC definition files.
+                       If None, uses the built-in IOC definitions from the package.
         """
-        self.issues_dir = Path(issues_dir)
+        if issues_dir is None:
+            # Use built-in IOC definitions from the package
+            import github_ioc_scanner
+            package_dir = Path(github_ioc_scanner.__file__).parent
+            self.issues_dir = package_dir / "issues"
+        else:
+            self.issues_dir = Path(issues_dir)
+        
         self._ioc_definitions: Dict[str, IOCDefinition] = {}
         self._ioc_hash: Optional[str] = None
     

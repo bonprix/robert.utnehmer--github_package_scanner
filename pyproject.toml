@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "github-ioc-scanner"
-version = "1.0.0"
+version = "1.0.1"
 description = "Scan GitHub repositories for Indicators of Compromise (IOCs) in package dependencies across multiple languages"
 authors = [{name = "GitHub IOC Scanner Contributors", email = "security@example.com"}]
 license = {text = "MIT"}
@@ -60,6 +60,9 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.setuptools.package-data]
+github_ioc_scanner = ["issues/*.py"]
 
 [tool.black]
 line-length = 88
