@@ -133,13 +133,13 @@ github-ioc-scan --org your-org --verbose
 
 The scanner includes comprehensive IOC definitions for:
 
-### 🚨 Latest npm Supply Chain Attack (September 2024)
+### 🚨 Latest npm Supply Chain Attack (September 2025)
 **Heise Security Report**: [Neuer NPM-Großangriff: Selbst-vermehrende Malware infiziert Dutzende Pakete](https://www.heise.de/news/Neuer-NPM-Grossangriff-Selbst-vermehrende-Malware-infiziert-Dutzende-Pakete-10651111.html)
 
 ✅ **Fully Covered**: All packages from this attack are included in our built-in IOC database
 
 ### Recent Supply Chain Attacks
-- **S1ngularity/NX Attack (September 2024)**: 2039+ compromised npm packages with self-replicating worm payload
+- **S1ngularity/NX Attack (September 2025)**: 2039+ compromised npm packages with self-replicating worm payload
   - **Coverage**: Fully covered in built-in IOC database
   - **Reference**: [Heise Security Report](https://www.heise.de/news/Neuer-NPM-Grossangriff-Selbst-vermehrende-Malware-infiziert-Dutzende-Pakete-10651111.html)
   - **Technical Details**: [Aikido Security Analysis](https://www.aikido.dev/blog/s1ngularity-nx-attackers-strike-again)
@@ -157,7 +157,7 @@ The scanner includes comprehensive IOC definitions for:
 - **2138+ IOC Definitions**: Comprehensive coverage of known malicious packages
 - **Regular Updates**: IOC definitions are continuously updated with new threats
 - **Multi-language**: Coverage across all supported package managers
-- **Current as of September 2024**: Includes latest npm supply chain attacks reported by Heise Security
+- **Current as of September 2025**: Includes latest npm supply chain attacks reported by Heise Security
 
 ## 📊 Output Formats
 

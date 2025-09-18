@@ -215,7 +215,7 @@ pnpm audit --audit-level high
 
 - **Socket.dev Blog**: https://socket.dev/blog/ongoing-supply-chain-attack-targets-crowdstrike-npm-packages
 - **CrowdStrike Official**: Offizielle Dokumentation für legitime Pakete
-- **NPM Security**: https://docs.npmjs.com/about-security-audits
+- **NPM Security**: https://docs.npmjs.com/about-audit-reports
 - **Supply Chain Security**: NIST Guidelines für Software Supply Chain Security
 
 ## 🎯 Fazit

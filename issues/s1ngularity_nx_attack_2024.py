@@ -1,9 +1,9 @@
 """
-S1ngularity/NX Attack & CrowdStrike Typosquatting Campaign - September 2024
+S1ngularity/NX Attack & CrowdStrike Typosquatting Campaign - September 2025
 
 This file contains IOC definitions for multiple related supply chain attacks:
 
-1. S1ngularity/NX Attack (September 16, 2024)
+1. S1ngularity/NX Attack (September 16, 2025)
    - Compromised numerous npm packages with malicious code
    - Included first-of-its-kind worm payload
    - Source: https://www.aikido.dev/blog/s1ngularity-nx-attackers-strike-again
@@ -2191,7 +2191,7 @@ IOC_PACKAGES = {
 # -------------------
 # This IOC list covers multiple attack campaigns:
 # 
-# 1. S1ngularity/NX Attack (September 2024)
+# 1. S1ngularity/NX Attack (September 2025)
 #    - Compromised legitimate packages with worm payload
 #    - Targeted development environments
 #    - Used sophisticated evasion techniques
