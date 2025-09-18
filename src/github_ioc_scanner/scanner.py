@@ -308,8 +308,8 @@ class GitHubIOCScanner:
         if self.config.repo and not self.config.org:
             raise ConfigurationError("Repository scanning requires organization context. Use --org parameter with --repo.")
         
-        # Validate issues directory
-        if not self.config.issues_dir or not self.config.issues_dir.strip():
+        # Validate issues directory (None means use built-in IOCs)
+        if self.config.issues_dir is not None and not self.config.issues_dir.strip():
             raise ConfigurationError("Issues directory path cannot be empty")
 
     def discover_organization_repositories(self, org: str) -> List[Repository]:
