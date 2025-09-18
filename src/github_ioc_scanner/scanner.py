@@ -371,6 +371,12 @@ class GitHubIOCScanner:
                 logger.debug(f"Filtered to {len(repositories)} non-archived repositories")
             
             logger.info(f"Batch discovered {len(repositories)} repositories for {org}")
+            
+            # If batch discovery returns empty, fallback to sequential
+            if not repositories:
+                logger.warning(f"Batch discovery returned no repositories, falling back to sequential")
+                return self.discover_organization_repositories(org)
+            
             return repositories
             
         except Exception as e:
