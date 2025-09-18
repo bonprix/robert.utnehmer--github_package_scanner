@@ -121,6 +121,12 @@ Authentication:
         )
 
         parser.add_argument(
+            "--team-first-org",
+            action="store_true",
+            help="Team-first organization scan: scan all teams first, then remaining repos (requires --org)",
+        )
+
+        parser.add_argument(
             "--repo",
             type=str,
             metavar="REPOSITORY",
@@ -145,6 +151,38 @@ Authentication:
             default=None,
             metavar="DIRECTORY",
             help="Directory containing IOC definition files (default: built-in IOCs)",
+        )
+
+        # SBOM scanning options
+        sbom_group = parser.add_argument_group("SBOM scanning")
+        
+        sbom_group.add_argument(
+            "--enable-sbom",
+            action="store_true",
+            default=True,
+            help="Enable SBOM (Software Bill of Materials) scanning (default: enabled)",
+        )
+        
+        sbom_group.add_argument(
+            "--disable-sbom",
+            action="store_true",
+            help="Disable SBOM scanning (scan only traditional lockfiles)",
+        )
+        
+        sbom_group.add_argument(
+            "--sbom-only",
+            action="store_true",
+            help="Scan only SBOM files (skip traditional lockfiles)",
+        )
+
+        # Authentication options
+        auth_group = parser.add_argument_group("authentication")
+        
+        auth_group.add_argument(
+            "--github-app-config",
+            type=str,
+            metavar="CONFIG_PATH",
+            help="Path to GitHub App configuration file (enables GitHub App authentication)",
         )
 
         # Cache management options
@@ -260,13 +298,25 @@ Authentication:
         elif parsed_args.disable_cross_repo_batching:
             enable_cross_repo = False
 
+        # Handle SBOM scanning options
+        enable_sbom = True  # Default to enabled
+        if parsed_args.disable_sbom:
+            enable_sbom = False
+        elif parsed_args.enable_sbom:
+            enable_sbom = True
+
         return ScanConfig(
             org=parsed_args.org,
             team=parsed_args.team,
             repo=parsed_args.repo,
+            team_first_org=getattr(parsed_args, 'team_first_org', False),
             fast_mode=parsed_args.fast,
             include_archived=parsed_args.include_archived,
             issues_dir=parsed_args.issues_dir,
+            enable_sbom=enable_sbom,
+            disable_sbom=parsed_args.disable_sbom,
+            sbom_only=getattr(parsed_args, 'sbom_only', False),
+            github_app_config=getattr(parsed_args, 'github_app_config', None),
             clear_cache=parsed_args.clear_cache,
             clear_cache_type=parsed_args.clear_cache_type,
             refresh_repo=parsed_args.refresh_repo,
@@ -316,6 +366,15 @@ Authentication:
         # Team and repo are mutually exclusive
         if config.team and config.repo:
             errors.append(ValidationError("--team and --repo cannot be used together (choose one scan mode)", field="team"))
+
+        # Team-first-org requires organization and is mutually exclusive with team/repo
+        if config.team_first_org:
+            if not config.org:
+                errors.append(ValidationError("--team-first-org requires --org to be specified", field="team_first_org"))
+            if config.team:
+                errors.append(ValidationError("--team-first-org and --team cannot be used together", field="team_first_org"))
+            if config.repo:
+                errors.append(ValidationError("--team-first-org and --repo cannot be used together", field="team_first_org"))
 
         # Validate organization name format (basic validation)
         if config.org and not self._is_valid_github_name(config.org):
@@ -986,8 +1045,11 @@ def main() -> None:
             if config.verbose:
                 logger.info(f"Loaded {len(iocs)} IOC files with {total_ioc_packages} total packages")
             
-            # Initialize GitHub client
-            github_client = GitHubClient()
+            # Initialize GitHub client with GitHub App support
+            github_client = GitHubClient(
+                github_app_config=config.github_app_config,
+                org=config.org
+            )
             
             # Initialize cache manager
             cache_manager = CacheManager()
@@ -996,8 +1058,18 @@ def main() -> None:
             def progress_callback(current: int, total: int, repo_name: str, start_time: float = None):
                 cli.display_progress(current, total, repo_name, config, start_time)
             
-            # Initialize scanner with progress callback
-            scanner = GitHubIOCScanner(config, github_client, cache_manager, ioc_loader, progress_callback)
+            # Determine SBOM scanning configuration
+            enable_sbom_scanning = config.enable_sbom and not config.disable_sbom
+            
+            # Initialize scanner with progress callback and SBOM options
+            scanner = GitHubIOCScanner(
+                config, 
+                github_client, 
+                cache_manager, 
+                ioc_loader, 
+                progress_callback,
+                enable_sbom_scanning=enable_sbom_scanning
+            )
             
             # Display professional scan start information
             cli.display_professional_scan_start(config, total_ioc_packages)

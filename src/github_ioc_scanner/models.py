@@ -11,13 +11,17 @@ class ScanConfig:
     org: Optional[str] = None
     team: Optional[str] = None
     repo: Optional[str] = None
+    team_first_org: bool = False  # New team-first organization scan mode
     fast_mode: bool = False
     include_archived: bool = False
     issues_dir: Optional[str] = "issues"
+    ioc_files: Optional[List[str]] = None
     # SBOM scanning options
     enable_sbom: bool = True
     disable_sbom: bool = False
     sbom_only: bool = False
+    # Authentication options
+    github_app_config: Optional[str] = None
     # Cache management options
     clear_cache: bool = False
     clear_cache_type: Optional[str] = None

@@ -24,8 +24,8 @@ Thank you for your interest in contributing to the GitHub IOC Scanner! This docu
 
 1. **Fork the Repository**
    ```bash
-   git clone https://github.com/your-username/github-ioc-scanner.git
-   cd github-ioc-scanner
+   git clone https://github.com/your-username/github_package_scanner.git
+   cd github_package_scanner
    ```
 
 2. **Set Up Development Environment**

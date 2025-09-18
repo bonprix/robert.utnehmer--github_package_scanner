@@ -9,7 +9,8 @@ from github_ioc_scanner.models import (
     ScanConfig, Repository, FileInfo, APIResponse, ScanResults, CacheStats,
     FileContent, PackageDependency, IOCMatch, IOCDefinition
 )
-from github_ioc_scanner.github_client import GitHubClient, GitHubAuthError
+from github_ioc_scanner.github_client import GitHubClient
+from github_ioc_scanner.exceptions import AuthenticationError
 from github_ioc_scanner.cache import CacheManager
 from github_ioc_scanner.ioc_loader import IOCLoader, IOCLoaderError
 
@@ -351,9 +352,9 @@ class TestGitHubIOCScanner:
         scanner.ioc_loader.get_ioc_hash.return_value = "test-hash"
         
         scanner.cache_manager.get_repository_metadata.return_value = None
-        scanner.github_client.get_organization_repos.side_effect = GitHubAuthError("Invalid token")
+        scanner.github_client.get_organization_repos.side_effect = AuthenticationError("Invalid token")
         
-        with pytest.raises(GitHubAuthError):
+        with pytest.raises(AuthenticationError):
             scanner.scan()
 
     def test_lockfile_patterns_comprehensive(self, scanner):

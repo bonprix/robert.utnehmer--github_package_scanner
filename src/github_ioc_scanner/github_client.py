@@ -27,6 +27,7 @@ from .logging_config import get_logger, log_exception, log_rate_limit
 from .smart_rate_limiter import handle_smart_rate_limiting, handle_rate_limit_exceeded
 from .models import APIResponse, FileContent, FileInfo, Repository
 from .batch_models import BatchRequest, BatchResult, BatchConfig
+from .github_app_auth import create_github_app_auth, GitHubAppAuth
 
 logger = get_logger(__name__)
 
@@ -36,14 +37,45 @@ class GitHubClient:
 
     BASE_URL = "https://api.github.com"
     
-    def __init__(self, token: Optional[str] = None, config: Optional[BatchConfig] = None) -> None:
+    def __init__(self, token: Optional[str] = None, config: Optional[BatchConfig] = None, 
+                 github_app_config: Optional[str] = None, org: Optional[str] = None) -> None:
         """Initialize the GitHub client with authentication token.
         
         Args:
             token: GitHub personal access token. If None, will attempt auto-discovery.
             config: Batch processing configuration
+            github_app_config: Path to GitHub App configuration file
+            org: Organization name (required for GitHub App auth)
         """
-        self.token = token or self._discover_token()
+        # Authentication priority:
+        # 1. Explicit token parameter
+        # 2. GitHub App authentication (if config available and org provided)
+        # 3. Token discovery (GITHUB_TOKEN env var or gh auth token)
+        
+        self.github_app_auth: Optional[GitHubAppAuth] = None
+        self.org = org
+        
+        if token:
+            # Explicit token provided - use it directly
+            self.token = token
+            logger.debug("Using explicitly provided token")
+        elif github_app_config or (org and create_github_app_auth()):
+            # Try GitHub App authentication
+            try:
+                self.github_app_auth = create_github_app_auth(github_app_config)
+                if self.github_app_auth and org:
+                    self.token = self.github_app_auth.get_token(org)
+                    logger.info(f"✅ Using GitHub App authentication for organization '{org}'")
+                else:
+                    logger.debug("GitHub App auth not available, falling back to token discovery")
+                    self.token = self._discover_token()
+            except Exception as e:
+                logger.warning(f"GitHub App authentication failed, falling back to token: {e}")
+                self.token = self._discover_token()
+        else:
+            # Fall back to token discovery
+            self.token = self._discover_token()
+        
         self.config = config or BatchConfig()
         self.client = httpx.Client(
             base_url=self.BASE_URL,
@@ -95,6 +127,19 @@ class GitHubClient:
         raise AuthenticationError(
             "No GitHub token found. Please set GITHUB_TOKEN environment variable or run 'gh auth login'"
         )
+    
+    def _refresh_token_if_needed(self) -> None:
+        """Refresh GitHub App token if needed and available."""
+        if self.github_app_auth and self.org:
+            try:
+                new_token = self.github_app_auth.get_token(self.org)
+                if new_token != self.token:
+                    self.token = new_token
+                    # Update client headers
+                    self.client.headers["Authorization"] = f"Bearer {self.token}"
+                    logger.debug("Refreshed GitHub App token")
+            except Exception as e:
+                logger.warning(f"Failed to refresh GitHub App token: {e}")
     
     def _make_request(
         self, 
@@ -327,6 +372,85 @@ class GitHubClient:
             log_exception(logger, f"Failed to get repositories for organization {org}", e)
             return APIResponse(data=[])  # Return empty instead of crashing
 
+    def get_organization_teams(self, org: str) -> List[Dict[str, Any]]:
+        """Get all teams in an organization.
+        
+        Args:
+            org: Organization name
+            
+        Returns:
+            List of team dictionaries containing team information
+            
+        Raises:
+            OrganizationNotFoundError: If the organization doesn't exist or is inaccessible
+            AuthenticationError: If authentication fails
+            NetworkError: If network operations fail
+        """
+        try:
+            url = f"/orgs/{quote(org)}/teams"
+            params = {
+                "per_page": 100,
+            }
+            
+            all_teams = []
+            page = 1
+            
+            while True:
+                params["page"] = page
+                logger.info(f"Fetching teams page {page} for organization {org}...")
+                response = self._make_request("GET", url, params=params)
+                
+                if not response.data:
+                    if page == 1:
+                        logger.info(f"No teams found for organization {org}")
+                        break
+                    break
+                    
+                teams_data = response.data
+                if not teams_data:
+                    break
+                    
+                try:
+                    for team_data in teams_data:
+                        team_info = {
+                            'id': team_data.get('id'),
+                            'name': team_data.get('name'),
+                            'slug': team_data.get('slug'),
+                            'description': team_data.get('description'),
+                            'privacy': team_data.get('privacy'),
+                            'permission': team_data.get('permission')
+                        }
+                        all_teams.append(team_info)
+                        
+                    logger.info(f"Page {page}: Found {len(teams_data)} teams (total: {len(all_teams)})")
+                    
+                except (KeyError, ValueError, TypeError) as e:
+                    logger.warning(f"Malformed team data in organization {org}: {e}")
+                    continue
+                
+                # Check if there are more pages
+                if len(teams_data) < params["per_page"]:
+                    break
+                    
+                page += 1
+            
+            logger.info(f"Retrieved {len(all_teams)} teams for organization {org}")
+            return all_teams
+            
+        except RateLimitError as e:
+            logger.warning(f"🚨 Rate limit hit while fetching teams for {org}: {e}")
+            self._handle_rate_limit(e.reset_time if hasattr(e, 'reset_time') else int(time.time()) + 3600)
+            
+            # Return empty list on rate limit to avoid blocking the scan
+            logger.warning(f"Returning empty teams list for {org} due to rate limit")
+            return []
+            
+        except (AuthenticationError, OrganizationNotFoundError):
+            raise
+        except Exception as e:
+            log_exception(logger, f"Failed to get teams for organization {org}", e)
+            return []  # Return empty instead of crashing
+
     def get_team_repos(
         self, org: str, team: str, etag: Optional[str] = None
     ) -> APIResponse:
@@ -410,6 +534,33 @@ class GitHubClient:
         except Exception as e:
             log_exception(logger, f"Failed to get repositories for team {org}/{team}", e)
             return APIResponse(data=[])  # Return empty instead of crashing
+
+    def get_team_repositories(self, org: str, team: str) -> List[Dict[str, Any]]:
+        """Get repositories for a specific team (wrapper for compatibility).
+        
+        Args:
+            org: Organization name
+            team: Team slug
+            
+        Returns:
+            List of repository dictionaries
+        """
+        try:
+            response = self.get_team_repos(org, team)
+            # Convert Repository objects to dictionaries
+            repos = []
+            for repo in response.data:
+                repos.append({
+                    'name': repo.name,
+                    'full_name': repo.full_name,
+                    'archived': repo.archived,
+                    'default_branch': repo.default_branch,
+                    'updated_at': repo.updated_at.isoformat() if repo.updated_at else None
+                })
+            return repos
+        except Exception as e:
+            logger.warning(f"Error getting team repositories for {org}/{team}: {e}")
+            return []
 
     def search_files(self, repo: Repository, patterns: List[str], fast_mode: bool = False) -> List[FileInfo]:
         """Search for files matching patterns in a repository using Code Search API with Tree API fallback.

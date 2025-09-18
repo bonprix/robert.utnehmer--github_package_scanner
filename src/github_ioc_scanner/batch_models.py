@@ -178,9 +178,9 @@ class PrioritizedFile:
 class BatchConfig:
     """Configuration for batch processing."""
     
-    # Concurrency settings
-    max_concurrent_requests: int = 10
-    max_concurrent_repos: int = 3
+    # Concurrency settings - reduced for better rate limit handling
+    max_concurrent_requests: int = 5  # Reduced from 10
+    max_concurrent_repos: int = 2     # Reduced from 3
     
     # Batch size settings
     default_batch_size: int = 10
@@ -188,9 +188,14 @@ class BatchConfig:
     min_batch_size: int = 1
     
     # Performance settings
-    rate_limit_buffer: float = 0.8  # Use 80% of available rate limit
+    rate_limit_buffer: float = 0.6  # Use 60% of available rate limit (more conservative)
     retry_attempts: int = 3
-    retry_delay_base: float = 1.0
+    retry_delay_base: float = 2.0    # Increased base delay
+    
+    # Rate limiting settings
+    enable_proactive_rate_limiting: bool = True
+    rate_limit_safety_margin: int = 100  # Stop when this many requests remain
+    adaptive_delay_enabled: bool = True
     
     # Memory settings
     max_memory_usage_mb: int = 500

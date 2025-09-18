@@ -1,6 +1,7 @@
 """Core scanning engine for the GitHub IOC Scanner."""
 
 import asyncio
+import time
 from typing import Any, Dict, List, Optional
 
 from .async_github_client import AsyncGitHubClient
@@ -226,6 +227,143 @@ class GitHubIOCScanner:
             log_exception(logger, "Unexpected error during batch scan", e)
             raise wrap_exception(e, "Unexpected error during batch scan", ScanError)
     
+    def _scan_team_first_organization(self, ioc_hash: str, start_time: float) -> ScanResults:
+        """Execute team-first organization scan.
+        
+        This method:
+        1. Discovers all repositories in the organization
+        2. Discovers all teams in the organization
+        3. Iterates through teams and scans their repositories
+        4. Removes processed repositories from the main list
+        5. Shows team results and accumulates overall results
+        6. Scans remaining repositories not assigned to any team
+        """
+        logger.info(f"Starting team-first organization scan for {self.config.org}")
+        
+        # Step 1: Get all repositories in the organization
+        logger.info(f"Discovering all repositories in organization {self.config.org}")
+        all_repositories = self.discover_organization_repositories(self.config.org)
+        remaining_repos = {repo.full_name: repo for repo in all_repositories}
+        
+        # Step 2: Get all teams in the organization
+        logger.info(f"Discovering all teams in organization {self.config.org}")
+        teams = self.github_client.get_organization_teams(self.config.org)
+        
+        # Initialize overall results
+        all_matches = []
+        total_files_scanned = 0
+        total_repos_scanned = 0
+        
+        # Step 3-5: Iterate through teams and scan their repositories
+        for i, team in enumerate(teams, 1):
+            team_name = team.get('name', team.get('slug', 'unknown'))
+            logger.info(f"Scanning team {i}/{len(teams)}: {team_name}")
+            
+            # Get team repositories
+            try:
+                team_repos_data = self.github_client.get_team_repositories(self.config.org, team_name)
+                if not team_repos_data:
+                    logger.info(f"  No repositories found for team {team_name}")
+                    continue
+                
+                # Convert to Repository objects
+                team_repos = []
+                for repo_data in team_repos_data:
+                    if repo_data['full_name'] in remaining_repos:
+                        team_repos.append(remaining_repos[repo_data['full_name']])
+                
+                if not team_repos:
+                    logger.info(f"  No unprocessed repositories found for team {team_name}")
+                    continue
+                    
+                logger.info(f"  Found {len(team_repos)} repositories for team {team_name}")
+                
+                # Scan team repositories
+                team_matches = []
+                team_files_scanned = 0
+                
+                for j, repo in enumerate(team_repos, 1):
+                    if not self.config.quiet:
+                        print(f"\r[Team {team_name}] [{j:3d}/{len(team_repos):3d}] Scanning {repo.full_name}...", end='', flush=True)
+                    
+                    matches, files_scanned = self.scan_repository_for_iocs(repo, ioc_hash)
+                    team_matches.extend(matches)
+                    team_files_scanned += files_scanned
+                    
+                    # Remove from remaining repositories
+                    remaining_repos.pop(repo.full_name, None)
+                
+                if not self.config.quiet:
+                    print()  # New line after progress
+                
+                # Display team results
+                if team_matches:
+                    print(f"\n🚨 TEAM '{team_name}' - THREATS DETECTED")
+                    print("=" * 60)
+                    for match in team_matches:
+                        print(f"   ⚠️  {match.file_path} | {match.package_name} | {match.version}")
+                    print(f"Team Summary: {len(team_matches)} threats in {len(team_repos)} repositories")
+                else:
+                    print(f"\n✅ TEAM '{team_name}' - NO THREATS DETECTED")
+                    print(f"Team Summary: {len(team_repos)} repositories scanned, no threats found")
+                
+                # Accumulate results
+                all_matches.extend(team_matches)
+                total_files_scanned += team_files_scanned
+                total_repos_scanned += len(team_repos)
+                
+            except Exception as e:
+                logger.warning(f"Error scanning team {team_name}: {e}")
+                continue
+        
+        # Step 6: Scan remaining repositories not assigned to any team
+        remaining_repo_list = list(remaining_repos.values())
+        if remaining_repo_list:
+            print(f"\n📋 SCANNING REMAINING REPOSITORIES ({len(remaining_repo_list)} repos)")
+            print("=" * 60)
+            
+            remaining_matches = []
+            remaining_files_scanned = 0
+            
+            for i, repo in enumerate(remaining_repo_list, 1):
+                if not self.config.quiet:
+                    print(f"\r[Remaining] [{i:3d}/{len(remaining_repo_list):3d}] Scanning {repo.full_name}...", end='', flush=True)
+                
+                matches, files_scanned = self.scan_repository_for_iocs(repo, ioc_hash)
+                remaining_matches.extend(matches)
+                remaining_files_scanned += files_scanned
+            
+            if not self.config.quiet:
+                print()  # New line after progress
+            
+            # Display remaining repositories results
+            if remaining_matches:
+                print(f"\n🚨 REMAINING REPOSITORIES - THREATS DETECTED")
+                print("=" * 60)
+                for match in remaining_matches:
+                    print(f"   ⚠️  {match.file_path} | {match.package_name} | {match.version}")
+                print(f"Remaining Summary: {len(remaining_matches)} threats in {len(remaining_repo_list)} repositories")
+            else:
+                print(f"\n✅ REMAINING REPOSITORIES - NO THREATS DETECTED")
+                print(f"Remaining Summary: {len(remaining_repo_list)} repositories scanned, no threats found")
+            
+            # Accumulate final results
+            all_matches.extend(remaining_matches)
+            total_files_scanned += remaining_files_scanned
+            total_repos_scanned += len(remaining_repo_list)
+        
+        # Create final results
+        end_time = time.time()
+        scan_duration = end_time - start_time
+        
+        return ScanResults(
+            matches=all_matches,
+            repositories_scanned=total_repos_scanned,
+            files_scanned=total_files_scanned,
+            scan_duration=scan_duration,
+            cache_stats=self.cache_manager.get_stats() if self.cache_manager else None
+        )
+
     def _scan_sequential(self) -> ScanResults:
         """Execute scan using sequential processing (original implementation)."""
         import time
@@ -263,6 +401,9 @@ class GitHubIOCScanner:
                         updated_at=None
                     )
                     repositories = [repo]
+                elif self.config.org and self.config.team_first_org:
+                    # Team-first organization scan
+                    return self._scan_team_first_organization(ioc_hash, start_time)
                 elif self.config.org:
                     # Scan organization repositories
                     repositories = self.discover_organization_repositories(self.config.org)

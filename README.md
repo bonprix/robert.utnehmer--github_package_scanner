@@ -4,18 +4,19 @@ A powerful command-line tool for scanning GitHub repositories to detect Indicato
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Security](https://img.shields.io/badge/security-focused-green.svg)](https://github.com/your-org/github-ioc-scanner)
+[![Security](https://img.shields.io/badge/security-focused-green.svg)](https://github.com/christianherweg0807/github_package_scanner)
 
 ## 🚀 Features
 
 - **Multi-Language Support**: JavaScript/Node.js, Python, Ruby, PHP, Go, Rust
-- **Flexible Scanning**: Organization-wide, team-specific, or individual repository scanning
+- **SBOM Integration**: Native support for Software Bill of Materials (SPDX, CycloneDX formats)
+- **Flexible Scanning**: Organization-wide, team-specific, team-first organization, or individual repository scanning
 - **High Performance**: Parallel processing with intelligent batching and caching
 - **Real-time Progress**: Live progress tracking with ETA calculations
 - **Supply Chain Security**: Detect compromised packages and typosquatting attacks
 - **Comprehensive IOCs**: Pre-loaded with 2138+ known malicious packages including recent npm attacks
 
-## 📦 Supported Package Managers
+## 📦 Supported Package Managers & SBOM Formats
 
 | Language | Package Managers | Files Scanned |
 |----------|------------------|---------------|
@@ -25,6 +26,16 @@ A powerful command-line tool for scanning GitHub repositories to detect Indicato
 | **PHP** | composer | `composer.lock` |
 | **Go** | go modules | `go.mod`, `go.sum` |
 | **Rust** | cargo | `Cargo.lock` |
+
+### SBOM (Software Bill of Materials) Support
+
+| Format | File Extensions | Description |
+|--------|----------------|-------------|
+| **SPDX** | `.json`, `.xml` | Industry standard SBOM format |
+| **CycloneDX** | `.json`, `.xml` | OWASP SBOM standard |
+| **Generic** | `.json`, `.xml` | Custom SBOM formats |
+
+**Supported SBOM Files**: `sbom.json`, `bom.json`, `cyclonedx.json`, `spdx.json`, `software-bill-of-materials.json`, and XML variants
 
 ## 🛠️ Installation
 
@@ -37,26 +48,43 @@ pip install github-ioc-scanner
 ### From Source
 
 ```bash
-git clone https://github.com/your-org/github-ioc-scanner.git
-cd github-ioc-scanner
+git clone https://github.com/christianherweg0807/github_package_scanner.git
+cd github_package_scanner
 pip install -e .
 ```
 
 ### Development Installation
 
 ```bash
-git clone https://github.com/your-org/github-ioc-scanner.git
-cd github-ioc-scanner
+git clone https://github.com/christianherweg0807/github_package_scanner.git
+cd github_package_scanner
 pip install -e ".[dev]"
 ```
 
 ## ⚡ Quick Start
 
-### 1. Set up GitHub Token
+### 1. Authentication
 
+#### Option A: Personal Access Token (Simple)
 ```bash
 export GITHUB_TOKEN="your_github_token_here"
 ```
+
+#### Option B: GitHub App (Enterprise)
+For better security and higher rate limits, use GitHub App authentication:
+
+```bash
+# Create ~/github/apps.yaml with your GitHub App credentials
+github-ioc-scan --org your-org --github-app-config ~/github/apps.yaml
+```
+
+**Benefits of GitHub Apps:**
+- Higher rate limits (5,000 requests/hour per installation)
+- Fine-grained permissions
+- Enterprise-friendly audit trails
+- Automatic token refresh
+
+See [GitHub App Authentication Guide](docs/GITHUB_APP_AUTHENTICATION.md) for setup instructions.
 
 ### 2. Basic Usage
 
@@ -87,6 +115,49 @@ Scan repositories belonging to a specific team:
 github-ioc-scan --org your-org --team security-team
 ```
 
+### Team-First Organization Scanning
+
+Scan all repositories in an organization, organized by teams for better visibility:
+```bash
+github-ioc-scan --org your-org --team-first-org
+```
+
+This approach:
+1. **Discovers all teams** in the organization
+2. **Scans team repositories** and displays results grouped by team
+3. **Scans remaining repositories** not assigned to any team
+4. **Provides team-level visibility** into security issues
+
+**Benefits:**
+- Clear visibility into which teams have security issues
+- Better organization of scan results
+- Easier to assign remediation tasks to specific teams
+- Comprehensive coverage of all repositories
+
+**Example Output:**
+```
+🚨 TEAM 'security-team' - THREATS DETECTED
+============================================================
+Found 2 indicators of compromise:
+
+📦 Repository: your-org/security-app
+   Threats found: 2
+   ⚠️  package.json | malicious-package | 1.0.0
+   ⚠️  requirements.txt | compromised-lib | 2.1.0
+
+✅ TEAM 'frontend-team' - NO THREATS DETECTED
+   Repositories scanned: 5
+   Files analyzed: 127
+
+🚨 TEAM 'backend-team' - THREATS DETECTED
+============================================================
+Found 1 indicators of compromise:
+
+📦 Repository: your-org/api-service
+   Threats found: 1
+   ⚠️  Cargo.lock | unsafe-crate | 0.3.2
+```
+
 ### Repository-specific Scanning
 
 Scan a specific repository:
@@ -107,6 +178,26 @@ By default, archived repositories are skipped. Include them with:
 ```bash
 github-ioc-scan --org your-org --include-archived
 ```
+
+### SBOM Scanning
+
+Scan Software Bill of Materials files alongside traditional lockfiles:
+
+```bash
+# Default: Scan both lockfiles and SBOM files
+github-ioc-scan --org your-org
+
+# Scan only SBOM files (skip traditional lockfiles)
+github-ioc-scan --org your-org --sbom-only
+
+# Disable SBOM scanning (traditional lockfiles only)
+github-ioc-scan --org your-org --disable-sbom
+```
+
+**Supported SBOM Formats:**
+- SPDX (JSON/XML): `spdx.json`, `spdx.xml`
+- CycloneDX (JSON/XML): `cyclonedx.json`, `bom.xml`
+- Generic formats: `sbom.json`, `software-bill-of-materials.json`
 
 ### Batch Processing
 
@@ -193,9 +284,11 @@ github-ioc-scan --org your-org --output json
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `GITHUB_TOKEN` | GitHub personal access token | Required |
+| `GITHUB_TOKEN` | GitHub personal access token | Required (if not using GitHub App) |
 | `GITHUB_IOC_CACHE_DIR` | Cache directory location | `~/.cache/github-ioc-scanner` |
 | `GITHUB_IOC_LOG_LEVEL` | Logging level | `INFO` |
+
+**Note**: When using GitHub App authentication, `GITHUB_TOKEN` is not required.
 
 ### Configuration File
 
@@ -301,10 +394,10 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🔗 Links
 
-- [GitHub Repository](https://github.com/your-org/github-ioc-scanner)
+- [GitHub Repository](https://github.com/christianherweg0807/github_package_scanner)
 - [PyPI Package](https://pypi.org/project/github-ioc-scanner/)
 - [Documentation](docs/)
-- [Issue Tracker](https://github.com/your-org/github-ioc-scanner/issues)
+- [Issue Tracker](https://github.com/christianherweg0807/github_package_scanner/issues)
 
 ## ⚠️ Disclaimer
 
