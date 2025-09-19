@@ -277,6 +277,12 @@ Authentication:
         batch_group = parser.add_argument_group("batch processing")
         
         batch_group.add_argument(
+            "--enable-batch-processing",
+            action="store_true",
+            help="Enable batch processing for improved performance (experimental)",
+        )
+        
+        batch_group.add_argument(
             "--batch-size",
             type=int,
             metavar="SIZE",
@@ -358,6 +364,7 @@ Authentication:
             verbose=getattr(parsed_args, 'verbose', False),
             log_file=getattr(parsed_args, 'log_file', None),
             quiet=getattr(parsed_args, 'quiet', False),
+            enable_batch_processing=getattr(parsed_args, 'enable_batch_processing', False),
             batch_size=getattr(parsed_args, 'batch_size', None),
             max_concurrent=getattr(parsed_args, 'max_concurrent', None),
             batch_strategy=getattr(parsed_args, 'batch_strategy', None),
@@ -1125,6 +1132,7 @@ def main() -> None:
                     github_client,
                     cache_manager,
                     ioc_loader,
+                    enable_batch_processing=getattr(resumed_config, 'enable_batch_processing', False),
                     enable_sbom_scanning=resumed_config.enable_sbom and not resumed_config.disable_sbom
                 )
                 
@@ -1204,6 +1212,7 @@ def main() -> None:
                 cache_manager, 
                 ioc_loader, 
                 progress_callback,
+                enable_batch_processing=config.enable_batch_processing,
                 enable_sbom_scanning=enable_sbom_scanning
             )
             
