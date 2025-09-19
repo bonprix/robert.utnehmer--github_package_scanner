@@ -133,8 +133,8 @@ All notable changes to this project will be documented in this file.
 
 #### Updated Documentation
 - **README.md**: SBOM feature documentation and usage examples
-- **SBOM_FEATURE_SUMMARY.md**: Comprehensive SBOM implementation guide
-- **RATE_LIMIT_IMPROVEMENTS.md**: Rate limiting optimization documentation
+- **[docs/SBOM_FEATURE_SUMMARY.md](docs/SBOM_FEATURE_SUMMARY.md)**: Comprehensive SBOM implementation guide
+- **[docs/RATE_LIMIT_IMPROVEMENTS.md](docs/RATE_LIMIT_IMPROVEMENTS.md)**: Rate limiting optimization documentation
 
 ### 🔒 Security Enhancements
 

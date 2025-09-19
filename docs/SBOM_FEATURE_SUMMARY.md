@@ -141,7 +141,7 @@ scanner = GitHubIOCScanner(
 ### Aktualisierte Dateien
 - `README.md` - Feature-Beschreibung und Beispiele
 - `examples/sbom_scanning_example.py` - Vollständiges Demo
-- `SBOM_FEATURE_SUMMARY.md` - Diese Zusammenfassung
+- `docs/SBOM_FEATURE_SUMMARY.md` - Diese Zusammenfassung
 
 ### Beispiel-Output
 ```
