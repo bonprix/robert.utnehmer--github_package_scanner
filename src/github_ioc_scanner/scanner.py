@@ -124,6 +124,9 @@ class GitHubIOCScanner:
                 config=batch_config or BatchConfig()
             )
             
+            # Set scanner reference for repository discovery
+            self.batch_coordinator.scanner = self
+            
             # Configure progress monitoring if callback is provided
             if self.progress_callback:
                 self._setup_batch_progress_monitoring()
@@ -171,10 +174,21 @@ class GitHubIOCScanner:
             
             try:
                 # Discover repositories to scan
+                logger.info("🔍 Starting repository discovery...")
                 repositories = await self._discover_repositories_batch()
-                logger.info(f"Found {len(repositories)} repositories to scan")
+                logger.info(f"✅ Repository discovery completed: {len(repositories)} repositories found")
+                
+                # Debug: Log first few repository names
+                if repositories:
+                    sample_repos = [repo.full_name for repo in repositories[:5]]
+                    logger.info(f"📋 Sample repositories: {sample_repos}")
+                    if len(repositories) > 5:
+                        logger.info(f"📊 Total repositories: {len(repositories)} (showing first 5)")
+                else:
+                    logger.warning("⚠️  No repositories found during discovery")
                 
                 if not repositories:
+                    logger.warning("🚫 No repositories to scan, returning empty results")
                     return ScanResults(
                         matches=[],
                         cache_stats=self.cache_manager.get_cache_stats(),
@@ -1228,11 +1242,16 @@ class GitHubIOCScanner:
         """Discover repositories using batch-optimized methods."""
         repositories = []
         
+        logger.info(f"🔍 Repository discovery config: org={self.config.org}, team={self.config.team}, repo={self.config.repo}, team_first_org={self.config.team_first_org}")
+        
         if self.config.org and self.config.team:
             # Scan team repositories using batch processing
+            logger.info(f"📋 Discovering team repositories: {self.config.org}/{self.config.team}")
             repositories = await self.discover_team_repositories_batch(self.config.org, self.config.team)
+            logger.info(f"✅ Team discovery completed: {len(repositories)} repositories")
         elif self.config.org and self.config.repo:
             # Scan specific repository
+            logger.info(f"📋 Scanning specific repository: {self.config.org}/{self.config.repo}")
             repo = Repository(
                 name=self.config.repo,
                 full_name=f"{self.config.org}/{self.config.repo}",
@@ -1241,12 +1260,16 @@ class GitHubIOCScanner:
                 updated_at=None
             )
             repositories = [repo]
+            logger.info(f"✅ Single repository configured: {repo.full_name}")
         elif self.config.org:
             # Use batch processing for organization discovery
+            logger.info(f"📋 Discovering organization repositories: {self.config.org}")
             repositories = await self.discover_organization_repositories_batch(self.config.org)
+            logger.info(f"✅ Organization discovery completed: {len(repositories)} repositories")
         else:
             raise ConfigurationError("Must specify at least --org parameter")
         
+        logger.info(f"🎯 Final repository count: {len(repositories)}")
         return repositories
     
     async def _scan_single_repository_batch(self, repo: Repository, ioc_hash: str) -> List[IOCMatch]:

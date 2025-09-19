@@ -232,7 +232,7 @@ class BatchCoordinator:
         repository_filter: Optional[str] = None,
         max_repositories: Optional[int] = None
     ) -> List[Repository]:
-        """Discover repositories in an organization.
+        """Discover repositories in an organization using async batch processing.
         
         Args:
             organization: Organization name
@@ -242,10 +242,36 @@ class BatchCoordinator:
         Returns:
             List of discovered repositories
         """
-        # For now, delegate to the scanner's synchronous repository discovery
-        # This is a temporary solution until we implement proper async organization discovery
-        logger.warning(f"Batch repository discovery not fully implemented, using fallback")
-        return []
+        logger.info(f"🔍 Async batch discovery for organization: {organization}")
+        
+        try:
+            # Since we don't have async repository discovery yet, we need to use
+            # the synchronous method but run it in a thread pool to avoid blocking
+            import asyncio
+            import functools
+            
+            # Get the synchronous GitHub client from the scanner
+            if hasattr(self, 'scanner') and self.scanner:
+                sync_discovery = functools.partial(
+                    self.scanner.discover_organization_repositories,
+                    organization
+                )
+                
+                # Run the synchronous discovery in a thread pool
+                repositories = await asyncio.get_event_loop().run_in_executor(
+                    None, sync_discovery
+                )
+                
+                logger.info(f"✅ Async batch discovery completed: {len(repositories)} repositories found")
+                return repositories
+            else:
+                logger.error("No scanner reference available for repository discovery")
+                raise Exception("Scanner reference not available")
+            
+        except Exception as e:
+            logger.error(f"❌ Async batch repository discovery failed: {e}")
+            # Don't return empty list, let the caller handle the fallback
+            raise
     
     async def process_files_batch(
         self,
