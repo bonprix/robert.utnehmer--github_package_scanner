@@ -279,7 +279,13 @@ Authentication:
         batch_group.add_argument(
             "--enable-batch-processing",
             action="store_true",
-            help="Enable batch processing for improved performance (experimental)",
+            help="Enable batch processing for improved performance (default: enabled)",
+        )
+        
+        batch_group.add_argument(
+            "--disable-batch-processing",
+            action="store_true",
+            help="Disable batch processing and use sequential processing",
         )
         
         batch_group.add_argument(
@@ -364,7 +370,7 @@ Authentication:
             verbose=getattr(parsed_args, 'verbose', False),
             log_file=getattr(parsed_args, 'log_file', None),
             quiet=getattr(parsed_args, 'quiet', False),
-            enable_batch_processing=getattr(parsed_args, 'enable_batch_processing', False),
+            enable_batch_processing=not getattr(parsed_args, 'disable_batch_processing', False),
             batch_size=getattr(parsed_args, 'batch_size', None),
             max_concurrent=getattr(parsed_args, 'max_concurrent', None),
             batch_strategy=getattr(parsed_args, 'batch_strategy', None),
@@ -1132,7 +1138,7 @@ def main() -> None:
                     github_client,
                     cache_manager,
                     ioc_loader,
-                    enable_batch_processing=getattr(resumed_config, 'enable_batch_processing', False),
+                    enable_batch_processing=getattr(resumed_config, 'enable_batch_processing', True),
                     enable_sbom_scanning=resumed_config.enable_sbom and not resumed_config.disable_sbom
                 )
                 

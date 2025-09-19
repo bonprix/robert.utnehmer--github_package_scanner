@@ -109,5 +109,6 @@ IOC_PACKAGES = {
     "ts-gaussian": {"3.0.6"},
     "ve-bamreader": {"0.2.6"},
     "ve-editor": {"1.0.1"},
+    "form-data": {"4.0.0"},
 }
 

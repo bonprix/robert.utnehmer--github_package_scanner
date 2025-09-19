@@ -38,7 +38,7 @@ class ScanConfig:
     log_file: Optional[str] = None
     quiet: bool = False
     # Batch processing options
-    enable_batch_processing: bool = False
+    enable_batch_processing: bool = True
     batch_size: Optional[int] = None
     max_concurrent: Optional[int] = None
     batch_strategy: Optional[str] = None
