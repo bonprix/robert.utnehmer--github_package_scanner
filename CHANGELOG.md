@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2025-09-19
+
+### 🎉 Major Release - Production Ready
+
+#### 🐛 Critical Bug Fixes
+- **Fixed form-data Cache Issue**: Resolved critical issue where form-data was incorrectly flagged as threat due to old installed package IOCs
+- **Token Refresh Problem**: Fixed GitHub App token expiration after 1 hour causing scan failures
+- **Resume Functionality**: Complete integration between CLI and scanner with state management
+- **Empty Repository Handling**: Graceful 409 error handling for repositories with no commits
+- **Network Timeout Issues**: Added retry logic with exponential backoff for temporary network issues
+
+#### 🚀 Enhanced Features
+- **Complete Error Handling Solution**: Comprehensive error handling with automatic recovery
+- **Advanced Rate Limiting**: Proactive and adaptive rate limiting strategies
+- **Network Resilience**: Robust network error handling with intelligent retry mechanisms
+- **Memory Management**: Optimized resource usage for large-scale scans
+- **Progress Monitoring**: Real-time progress tracking with detailed metrics
+
+#### 📚 Documentation Reorganization
+- **Moved all feature documentation to `docs/` directory**
+- **Created comprehensive `docs/INDEX.md` navigation guide**
+- **Updated all documentation links and references**
+- **Maintained clean root directory structure**
+
+#### 🧹 Project Cleanup
+- **Removed 68+ debug and test artifacts**
+- **Eliminated all unused code and backup files**
+- **Optimized project structure for production use**
+- **Professional documentation organization**
+
+#### 🔒 Security Enhancements
+- **2,138+ IOC definitions** including latest npm supply chain attacks
+- **Enhanced SBOM scanning** with multiple format support
+- **Improved threat detection accuracy**
+
+### 🛠️ Technical Improvements
+- **Development Installation**: Package now installs in development mode using local files
+- **Cache Optimization**: Improved caching strategies with proper IOC hash validation
+- **Batch Processing**: Enhanced batch processing with comprehensive error handling
+- **State Management**: Complete scan state persistence and resumption
+
+---
+
 ## [1.2.0] - 2025-09-18
 
 ### 🎯 Major New Features
