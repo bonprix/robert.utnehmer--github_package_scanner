@@ -123,7 +123,11 @@ class BatchCoordinator:
         
         try:
             logger.info(f"Processing batch of {len(repositories)} repositories with strategy {strategy or self.current_strategy}")
-
+            
+            # For very large repository counts, use chunked processing to avoid memory/performance issues
+            if len(repositories) > 1000:
+                logger.info(f"Large repository count ({len(repositories)}), using chunked processing")
+                return await self._process_repositories_chunked(repositories, strategy, file_patterns)
             
             # Step 1: Analyze repositories for cross-repo batching opportunities
             cross_repo_opportunities = await self._analyze_cross_repo_opportunities(repositories)
@@ -1083,6 +1087,61 @@ class BatchCoordinator:
         logger.debug(f"Progress monitoring stats: {final_stats}")
         
         return results
+    
+    async def _process_repositories_chunked(
+        self,
+        repositories: List[Repository],
+        strategy: Optional[BatchStrategy] = None,
+        file_patterns: Optional[List[str]] = None,
+        chunk_size: int = 500
+    ) -> Dict[str, List[IOCMatch]]:
+        """Process large repository lists in smaller chunks to avoid memory/performance issues.
+        
+        Args:
+            repositories: Large list of repositories to process
+            strategy: Batching strategy to use
+            file_patterns: Optional file patterns to focus on
+            chunk_size: Size of each chunk (default: 500)
+            
+        Returns:
+            Dictionary mapping repository names to IOC matches
+        """
+        logger.info(f"Processing {len(repositories)} repositories in chunks of {chunk_size}")
+        
+        all_results = {}
+        total_chunks = (len(repositories) + chunk_size - 1) // chunk_size
+        
+        # Process repositories in chunks
+        for chunk_idx in range(0, len(repositories), chunk_size):
+            chunk_end = min(chunk_idx + chunk_size, len(repositories))
+            chunk = repositories[chunk_idx:chunk_end]
+            chunk_num = (chunk_idx // chunk_size) + 1
+            
+            logger.info(f"📦 Processing chunk {chunk_num}/{total_chunks}: repositories {chunk_idx+1}-{chunk_end}")
+            
+            try:
+                # Process this chunk using the standard sequential method
+                # Skip the expensive cross-repo analysis for chunks
+                chunk_results = await self._process_repositories_sequentially(
+                    chunk, strategy or BatchStrategy.CONSERVATIVE, file_patterns
+                )
+                
+                # Merge results
+                all_results.update(chunk_results)
+                
+                logger.info(f"✅ Chunk {chunk_num}/{total_chunks} completed: {len(chunk_results)} repositories processed")
+                
+                # Small delay between chunks to prevent overwhelming the system
+                if chunk_num < total_chunks:
+                    await asyncio.sleep(0.1)
+                    
+            except Exception as e:
+                logger.error(f"❌ Chunk {chunk_num}/{total_chunks} failed: {e}")
+                # Continue with next chunk instead of failing completely
+                continue
+        
+        logger.info(f"🎯 Chunked processing completed: {len(all_results)} total repositories processed")
+        return all_results
     
     async def _process_single_repository_batch(
         self,
