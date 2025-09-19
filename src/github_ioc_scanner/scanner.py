@@ -499,7 +499,6 @@ class GitHubIOCScanner:
             matches=all_matches,
             repositories_scanned=total_repos_scanned,
             files_scanned=total_files_scanned,
-            scan_duration=scan_duration,
             cache_stats=self.cache_manager.get_cache_stats() if self.cache_manager else None
         )
 
@@ -524,12 +523,17 @@ class GitHubIOCScanner:
                 log_exception(logger, "Failed to load IOC definitions", e)
                 raise wrap_exception(e, "Failed to load IOC definitions", IOCLoaderError)
             
-            # Discover repositories to scan
+            # Discover repositories to scan and create scan state
             repositories = []
+            scan_type = None
+            target = None
+            
             try:
                 if self.config.org and self.config.team:
                     # Scan team repositories
                     repositories = self.discover_team_repositories(self.config.org, self.config.team)
+                    scan_type = 'team'
+                    target = self.config.team
                 elif self.config.org and self.config.repo:
                     # Scan specific repository
                     repo = Repository(
@@ -540,14 +544,52 @@ class GitHubIOCScanner:
                         updated_at=None
                     )
                     repositories = [repo]
+                    scan_type = 'repo'
+                    target = self.config.repo
                 elif self.config.org and self.config.team_first_org:
                     # Team-first organization scan
                     return self._scan_team_first_organization(ioc_hash, start_time)
                 elif self.config.org:
                     # Scan organization repositories
                     repositories = self.discover_organization_repositories(self.config.org)
+                    scan_type = 'org'
+                    target = self.config.org
                 else:
                     raise ConfigurationError("Must specify at least --org parameter")
+                
+                # Create scan state for resumability (except for team-first-org which handles it separately)
+                if self.scan_state_manager and scan_type and not self.resume_state:
+                    from .scan_state import ScanState
+                    
+                    config_dict = {
+                        'org': self.config.org,
+                        'team': getattr(self.config, 'team', None),
+                        'repo': getattr(self.config, 'repo', None),
+                        'team_first_org': self.config.team_first_org,
+                        'enable_sbom': self.config.enable_sbom,
+                        'include_archived': self.config.include_archived
+                    }
+                    
+                    self.current_scan_state = self.scan_state_manager.create_scan_state(
+                        org=self.config.org,
+                        scan_type=scan_type,
+                        target=target,
+                        config=config_dict
+                    )
+                    
+                    # Update scan state with repository count
+                    self.current_scan_state.total_repositories = len(repositories)
+                    self.scan_state_manager.save_state(self.current_scan_state)
+                    
+                    if not self.config.quiet:
+                        print(f"💾 Scan ID: {self.current_scan_state.scan_id}")
+                        print(f"   (Use --resume {self.current_scan_state.scan_id} to resume if interrupted)")
+                elif self.resume_state:
+                    # Resuming from previous scan
+                    self.current_scan_state = self.resume_state
+                    if not self.config.quiet:
+                        print(f"🔄 Resuming scan ID: {self.current_scan_state.scan_id}")
+                        print(f"   Progress: {self.current_scan_state.repositories_scanned}/{self.current_scan_state.total_repositories} repositories")
                     
                 logger.info(f"Found {len(repositories)} repositories to scan")
                 
@@ -576,6 +618,27 @@ class GitHubIOCScanner:
                     all_matches.extend(repo_matches)
                     total_files_scanned += files_scanned
                     successful_repos += 1
+                    
+                    # Update scan state if available
+                    if self.current_scan_state and self.scan_state_manager:
+                        from .scan_state import add_ioc_match_to_state
+                        
+                        # Add repository to completed list
+                        if self.current_scan_state.completed_repositories is None:
+                            self.current_scan_state.completed_repositories = []
+                        self.current_scan_state.completed_repositories.append(repo.full_name)
+                        
+                        # Add matches to state
+                        for match in repo_matches:
+                            add_ioc_match_to_state(self.current_scan_state, match)
+                        
+                        # Update progress counters
+                        self.current_scan_state.repositories_scanned = successful_repos
+                        self.current_scan_state.files_scanned = total_files_scanned
+                        self.current_scan_state.last_update = time.time()
+                        
+                        # Save updated state
+                        self.scan_state_manager.save_state(self.current_scan_state)
                     
                     if repo_matches:
                         logger.info(f"Found {len(repo_matches)} IOC matches in {repo.full_name}")
