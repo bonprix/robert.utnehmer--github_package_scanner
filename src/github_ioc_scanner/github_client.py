@@ -128,18 +128,123 @@ class GitHubClient:
             "No GitHub token found. Please set GITHUB_TOKEN environment variable or run 'gh auth login'"
         )
     
-    def _refresh_token_if_needed(self) -> None:
-        """Refresh GitHub App token if needed and available."""
+    def _refresh_token_if_needed(self) -> bool:
+        """Refresh GitHub App token if needed and available.
+        
+        Returns:
+            True if token was refreshed, False otherwise
+        """
         if self.github_app_auth and self.org:
             try:
                 new_token = self.github_app_auth.get_token(self.org)
                 if new_token != self.token:
+                    old_token_prefix = self.token[:10] if self.token else "None"
                     self.token = new_token
                     # Update client headers
                     self.client.headers["Authorization"] = f"Bearer {self.token}"
-                    logger.debug("Refreshed GitHub App token")
+                    logger.info(f"🔄 Refreshed GitHub App token: {old_token_prefix}... → {self.token[:10]}...")
+                    return True
+                else:
+                    logger.debug("GitHub App token is still valid")
+                    return False
             except Exception as e:
                 logger.warning(f"Failed to refresh GitHub App token: {e}")
+                return False
+        return False
+    
+    def _handle_network_error_with_retry(self, error_type: str, method: str, url: str, headers: Dict[str, Any], 
+                                        params: Optional[Dict[str, Any]] = None, etag: Optional[str] = None, 
+                                        original_error: Exception = None, max_retries: int = 3, **kwargs: Any) -> APIResponse:
+        """Handle network errors with exponential backoff retry.
+        
+        Args:
+            error_type: Type of network error (for logging)
+            method: HTTP method
+            url: Request URL
+            headers: Request headers
+            params: Request parameters
+            etag: ETag for conditional requests
+            original_error: The original network error
+            max_retries: Maximum number of retry attempts
+            **kwargs: Additional request arguments
+            
+        Returns:
+            APIResponse from successful retry
+            
+        Raises:
+            NetworkError: If all retries fail
+        """
+        import time
+        import random
+        
+        for attempt in range(max_retries):
+            # Calculate exponential backoff with jitter
+            base_delay = 2 ** attempt  # 1s, 2s, 4s, 8s...
+            jitter = random.uniform(0.1, 0.5)  # Add randomness to avoid thundering herd
+            delay = base_delay + jitter
+            
+            logger.warning(f"🔄 {error_type.title()} for {url} - attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s...")
+            time.sleep(delay)
+            
+            try:
+                # Retry the request
+                response = self.client.request(method, url, headers=headers, params=params, **kwargs)
+                
+                # Process the retry response
+                remaining = int(response.headers.get("X-RateLimit-Remaining", 0))
+                reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
+                
+                # Handle rate limiting
+                if response.status_code == 403:
+                    error_message = response.text.lower()
+                    if "rate limit exceeded" in error_message or "api rate limit exceeded" in error_message:
+                        reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
+                        raise RateLimitError(
+                            f"GitHub API rate limit exceeded. Resets at {datetime.fromtimestamp(reset_time)}",
+                            reset_time=reset_time
+                        )
+                
+                # Handle 304 Not Modified
+                if response.status_code == 304:
+                    return APIResponse(
+                        data=None,
+                        etag=etag,
+                        not_modified=True,
+                        rate_limit_remaining=remaining,
+                        rate_limit_reset=reset_time,
+                    )
+                
+                response.raise_for_status()
+                
+                try:
+                    data = response.json() if response.content else None
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse JSON response from {url}: {e}")
+                    data = None
+                
+                logger.info(f"✅ Request successful after {error_type} retry (attempt {attempt + 1})")
+                return APIResponse(
+                    data=data,
+                    etag=response.headers.get("ETag"),
+                    not_modified=False,
+                    rate_limit_remaining=remaining,
+                    rate_limit_reset=reset_time,
+                )
+                
+            except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RequestError) as retry_error:
+                if attempt == max_retries - 1:  # Last attempt
+                    logger.error(f"🚨 All {max_retries} retry attempts failed for {url}")
+                    raise NetworkError(f"{error_type.title()} from GitHub API: {url} (after {max_retries} retries)", cause=original_error)
+                else:
+                    logger.warning(f"   Retry attempt {attempt + 1} failed: {retry_error}")
+                    continue
+            except Exception as retry_error:
+                # Other errors (like HTTP errors) should not be retried
+                logger.warning(f"   Retry attempt {attempt + 1} failed with non-network error: {retry_error}")
+                raise
+        
+        # This should not be reached, but just in case
+        raise NetworkError(f"{error_type.title()} from GitHub API: {url} (after {max_retries} retries)", cause=original_error)
     
     def _make_request(
         self, 
@@ -211,20 +316,84 @@ class GitHubClient:
             
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
+                # Try token refresh and retry if GitHub App is available
+                if self.github_app_auth and self.org:
+                    logger.warning("🔄 Received 401 Unauthorized - attempting GitHub App token refresh...")
+                    try:
+                        # Refresh token
+                        refreshed = self._refresh_token_if_needed()
+                        if refreshed:
+                            # Update headers with new token
+                            headers["Authorization"] = f"Bearer {self.token}"
+                            
+                            # Retry the request
+                            retry_response = self.client.request(method, url, headers=headers, params=params, **kwargs)
+                            
+                            # Process the retry response
+                            remaining = int(retry_response.headers.get("X-RateLimit-Remaining", 0))
+                            reset_time = int(retry_response.headers.get("X-RateLimit-Reset", 0))
+                            
+                            if retry_response.status_code == 304:
+                                return APIResponse(
+                                    data=None,
+                                    etag=etag,
+                                    not_modified=True,
+                                    rate_limit_remaining=remaining,
+                                    rate_limit_reset=reset_time,
+                                )
+                            
+                            retry_response.raise_for_status()
+                            
+                            try:
+                                retry_data = retry_response.json() if retry_response.content else None
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"Failed to parse JSON response from {url}: {e}")
+                                retry_data = None
+                            
+                            logger.info("✅ Request successful after GitHub App token refresh")
+                            return APIResponse(
+                                data=retry_data,
+                                etag=retry_response.headers.get("ETag"),
+                                not_modified=False,
+                                rate_limit_remaining=remaining,
+                                rate_limit_reset=reset_time,
+                            )
+                    except Exception as retry_error:
+                        logger.warning(f"Token refresh retry failed: {retry_error}")
+                        pass  # Fall through to original error
+                else:
+                    logger.debug("Token refresh not attempted (no new token available)")
+                
+                # Check if this might be a repository access issue
+                if "/repos/" in url:
+                    repo_path = url.split("/repos/")[1].split("/")[0]
+                    logger.warning(f"Access denied to repository: {repo_path} - may be private or restricted")
+                
                 raise AuthenticationError("Invalid GitHub token or insufficient permissions")
             elif e.response.status_code == 404:
                 logger.debug(f"Resource not found: {url}")
                 return APIResponse(data=None)
+            elif e.response.status_code == 409:
+                # Handle empty repositories gracefully
+                error_text = e.response.text.lower()
+                if "empty" in error_text or "repository is empty" in error_text:
+                    logger.debug(f"Empty repository detected: {url}")
+                    return APIResponse(data=None)
+                else:
+                    raise APIError(f"Conflict: {e.response.text}", status_code=409)
             elif e.response.status_code == 422:
                 raise APIError(f"Unprocessable entity: {e.response.text}", status_code=422)
             else:
                 raise APIError(f"HTTP {e.response.status_code}: {e.response.text}", status_code=e.response.status_code)
         except httpx.ConnectTimeout as e:
-            raise NetworkError(f"Connection timeout to GitHub API: {url}", cause=e)
+            # Retry connection timeouts with exponential backoff
+            return self._handle_network_error_with_retry("connection timeout", method, url, headers, params, etag, e, **kwargs)
         except httpx.ReadTimeout as e:
-            raise NetworkError(f"Read timeout from GitHub API: {url}", cause=e)
+            # Retry read timeouts with exponential backoff
+            return self._handle_network_error_with_retry("read timeout", method, url, headers, params, etag, e, **kwargs)
         except httpx.RequestError as e:
-            raise NetworkError(f"Network error accessing GitHub API: {url}", cause=e)
+            # Retry other network errors with exponential backoff
+            return self._handle_network_error_with_retry("network error", method, url, headers, params, etag, e, **kwargs)
         except (RateLimitError, AuthenticationError, APIError, NetworkError):
             # These are expected exceptions that should be re-raised as-is
             raise
@@ -663,7 +832,7 @@ class GitHubClient:
             # Get the complete tree
             tree_response = self.get_tree(repo)
             if not tree_response.data:
-                logger.debug(f"No tree data available for {repo.full_name}")
+                logger.debug(f"No tree data available for {repo.full_name} (likely empty repository)")
                 return []
             
             all_files = tree_response.data

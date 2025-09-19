@@ -22,6 +22,11 @@ class ScanConfig:
     sbom_only: bool = False
     # Authentication options
     github_app_config: Optional[str] = None
+    # Resume and checkpointing options
+    resume: Optional[str] = None
+    list_scans: bool = False
+    save_state: bool = True
+    no_save_state: bool = False
     # Cache management options
     clear_cache: bool = False
     clear_cache_type: Optional[str] = None

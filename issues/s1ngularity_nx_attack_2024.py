@@ -1101,7 +1101,6 @@ IOC_PACKAGES = {
     # Regular packages (non-scoped) with specific compromised versions
     # -------------------
     "angulartics2": ["14.1.2"],
-    "form-data": ["4.0.0"],
     "encounter-playground": ["0.0.4", "0.0.5"],
     "eslint-config-teselagen": ["6.1.7"],
     "graphql-sequelize-teselagen": ["5.3.8"],

@@ -10,6 +10,7 @@ from .batch_models import BatchConfig, BatchStrategy
 from .cache import CacheManager
 from .exceptions import (
     AuthenticationError,
+    NetworkError,
     IOCLoaderError,
     ScanError,
     ConfigurationError,
@@ -96,6 +97,14 @@ class GitHubIOCScanner:
         self.progress_callback = progress_callback
         self.enable_batch_processing = enable_batch_processing
         self.enable_sbom_scanning = enable_sbom_scanning
+        
+        # Initialize scan state manager if state saving is enabled
+        self.scan_state_manager = None
+        self.current_scan_state = None
+        self.resume_state = None  # For resuming previous scans
+        if config.save_state and not config.no_save_state:
+            from .scan_state import ScanStateManager
+            self.scan_state_manager = ScanStateManager()
         
         # Initialize batch processing components if enabled
         self.batch_coordinator: Optional[BatchCoordinator] = None
@@ -240,24 +249,114 @@ class GitHubIOCScanner:
         """
         logger.info(f"Starting team-first organization scan for {self.config.org}")
         
+        # Initialize or resume scan state
+        if self.scan_state_manager:
+            from .scan_state import ScanState, add_ioc_match_to_state, convert_state_matches_to_ioc_matches
+            
+            if self.resume_state:
+                # Resuming from previous scan
+                self.current_scan_state = self.resume_state
+                if not self.config.quiet:
+                    print(f"🔄 Resuming scan ID: {self.current_scan_state.scan_id}")
+                    print(f"   Progress: {self.current_scan_state.repositories_scanned}/{self.current_scan_state.total_repositories} repositories")
+                    if self.current_scan_state.current_team_index is not None:
+                        print(f"   Current team: {self.current_scan_state.current_team_index + 1}/{self.current_scan_state.total_teams}")
+            else:
+                # Create new scan state
+                config_dict = {
+                    'org': self.config.org,
+                    'team_first_org': self.config.team_first_org,
+                    'enable_sbom': self.config.enable_sbom,
+                    'include_archived': self.config.include_archived
+                }
+                
+                self.current_scan_state = self.scan_state_manager.create_scan_state(
+                    org=self.config.org,
+                    scan_type='team-first-org',
+                    target=self.config.org,
+                    config=config_dict
+                )
+                
+                if not self.config.quiet:
+                    print(f"💾 Scan ID: {self.current_scan_state.scan_id}")
+                    print(f"   (Use --resume {self.current_scan_state.scan_id} to resume if interrupted)")
+        
         # Step 1: Get all repositories in the organization
+        if not self.config.quiet:
+            print("🔍 Discovering repositories in organization...")
         logger.info(f"Discovering all repositories in organization {self.config.org}")
         all_repositories = self.discover_organization_repositories(self.config.org)
         remaining_repos = {repo.full_name: repo for repo in all_repositories}
         
+        if not self.config.quiet:
+            print(f"✅ Found {len(all_repositories)} repositories in organization")
+        
         # Step 2: Get all teams in the organization
+        if not self.config.quiet:
+            print("👥 Discovering teams in organization...")
         logger.info(f"Discovering all teams in organization {self.config.org}")
         teams = self.github_client.get_organization_teams(self.config.org)
+        
+        if not self.config.quiet:
+            print(f"✅ Found {len(teams)} teams in organization")
+            print(f"🚀 Starting team-by-team scan...")
+        
+        # Update scan state with discovery results
+        if self.current_scan_state:
+            self.current_scan_state.total_repositories = len(all_repositories)
+            self.current_scan_state.total_teams = len(teams)
+            self.scan_state_manager.save_state(self.current_scan_state)
         
         # Initialize overall results
         all_matches = []
         total_files_scanned = 0
         total_repos_scanned = 0
         
+        # Initialize results from resume state if available
+        if self.resume_state and self.resume_state.matches:
+            from .scan_state import convert_state_matches_to_ioc_matches
+            all_matches = convert_state_matches_to_ioc_matches(self.resume_state.matches)
+            total_files_scanned = self.resume_state.files_scanned
+            total_repos_scanned = self.resume_state.repositories_scanned
+            
+            if not self.config.quiet and all_matches:
+                print(f"\n📋 PREVIOUSLY FOUND THREATS ({len(all_matches)} threats)")
+                print("=" * 60)
+                for match in all_matches:
+                    print(f"   ⚠️  {match.repo} | {match.file_path} | {match.package_name} | {match.version}")
+                print(f"Previous scan found {len(all_matches)} threats in {total_repos_scanned} repositories")
+                print("Continuing scan to find additional threats...")
+        
         # Step 3-5: Iterate through teams and scan their repositories
+        start_team_index = 0
+        if self.resume_state and self.resume_state.current_team_index is not None:
+            start_team_index = self.resume_state.current_team_index
+            if not self.config.quiet:
+                print(f"🔄 Resuming from team {start_team_index + 1}/{len(teams)}")
+        
         for i, team in enumerate(teams, 1):
+            # Skip already processed teams when resuming
+            if i - 1 < start_team_index:
+                continue
+                
             team_name = team.get('name', team.get('slug', 'unknown'))
+            
+            # Skip already completed teams when resuming
+            if (self.resume_state and self.resume_state.completed_teams and 
+                team_name in self.resume_state.completed_teams):
+                if not self.config.quiet:
+                    print(f"\n[{i:3d}/{len(teams):3d}] ✅ Team '{team_name}' already completed (skipping)")
+                continue
+            
+            if not self.config.quiet:
+                print(f"\n[{i:3d}/{len(teams):3d}] 👥 Processing team '{team_name}'...")
+            
             logger.info(f"Scanning team {i}/{len(teams)}: {team_name}")
+            
+            # Update current team in scan state
+            if self.current_scan_state:
+                self.current_scan_state.current_team_index = i - 1
+                self.current_scan_state.current_team_name = team_name
             
             # Get team repositories
             try:
@@ -273,8 +372,13 @@ class GitHubIOCScanner:
                         team_repos.append(remaining_repos[repo_data['full_name']])
                 
                 if not team_repos:
+                    if not self.config.quiet:
+                        print(f"     ⚠️  No unprocessed repositories for team '{team_name}'")
                     logger.info(f"  No unprocessed repositories found for team {team_name}")
                     continue
+                
+                if not self.config.quiet:
+                    print(f"     📦 Found {len(team_repos)} repositories to scan")
                     
                 logger.info(f"  Found {len(team_repos)} repositories for team {team_name}")
                 
@@ -283,12 +387,41 @@ class GitHubIOCScanner:
                 team_files_scanned = 0
                 
                 for j, repo in enumerate(team_repos, 1):
+                    # Skip already processed repositories when resuming
+                    if (self.resume_state and self.resume_state.completed_repositories and 
+                        repo.full_name in self.resume_state.completed_repositories):
+                        if not self.config.quiet:
+                            print(f"\r[Team {team_name}] [{j:3d}/{len(team_repos):3d}] ✅ {repo.full_name} already completed", end='', flush=True)
+                        # Still remove from remaining repositories
+                        remaining_repos.pop(repo.full_name, None)
+                        continue
+                    
                     if not self.config.quiet:
                         print(f"\r[Team {team_name}] [{j:3d}/{len(team_repos):3d}] Scanning {repo.full_name}...", end='', flush=True)
                     
                     matches, files_scanned = self.scan_repository_for_iocs(repo, ioc_hash)
                     team_matches.extend(matches)
                     team_files_scanned += files_scanned
+                    total_repos_scanned += 1
+                    
+                    # Update scan state with progress
+                    if self.current_scan_state:
+                        self.current_scan_state.repositories_scanned = total_repos_scanned
+                        self.current_scan_state.files_scanned = total_files_scanned + team_files_scanned
+                        
+                        # Add to completed repositories
+                        if not self.current_scan_state.completed_repositories:
+                            self.current_scan_state.completed_repositories = []
+                        self.current_scan_state.completed_repositories.append(repo.full_name)
+                        
+                        # Add matches to state
+                        if matches:
+                            from .scan_state import add_ioc_match_to_state
+                            for match in matches:
+                                add_ioc_match_to_state(self.current_scan_state, match)
+                        
+                        # Save state periodically
+                        self.scan_state_manager.save_state(self.current_scan_state)
                     
                     # Remove from remaining repositories
                     remaining_repos.pop(repo.full_name, None)
@@ -301,7 +434,7 @@ class GitHubIOCScanner:
                     print(f"\n🚨 TEAM '{team_name}' - THREATS DETECTED")
                     print("=" * 60)
                     for match in team_matches:
-                        print(f"   ⚠️  {match.file_path} | {match.package_name} | {match.version}")
+                        print(f"   ⚠️  {match.repo} | {match.file_path} | {match.package_name} | {match.version}")
                     print(f"Team Summary: {len(team_matches)} threats in {len(team_repos)} repositories")
                 else:
                     print(f"\n✅ TEAM '{team_name}' - NO THREATS DETECTED")
@@ -310,7 +443,13 @@ class GitHubIOCScanner:
                 # Accumulate results
                 all_matches.extend(team_matches)
                 total_files_scanned += team_files_scanned
-                total_repos_scanned += len(team_repos)
+                
+                # Mark team as completed
+                if self.current_scan_state:
+                    if not self.current_scan_state.completed_teams:
+                        self.current_scan_state.completed_teams = []
+                    self.current_scan_state.completed_teams.append(team_name)
+                    self.scan_state_manager.save_state(self.current_scan_state)
                 
             except Exception as e:
                 logger.warning(f"Error scanning team {team_name}: {e}")
@@ -341,7 +480,7 @@ class GitHubIOCScanner:
                 print(f"\n🚨 REMAINING REPOSITORIES - THREATS DETECTED")
                 print("=" * 60)
                 for match in remaining_matches:
-                    print(f"   ⚠️  {match.file_path} | {match.package_name} | {match.version}")
+                    print(f"   ⚠️  {match.repo} | {match.file_path} | {match.package_name} | {match.version}")
                 print(f"Remaining Summary: {len(remaining_matches)} threats in {len(remaining_repo_list)} repositories")
             else:
                 print(f"\n✅ REMAINING REPOSITORIES - NO THREATS DETECTED")
@@ -361,7 +500,7 @@ class GitHubIOCScanner:
             repositories_scanned=total_repos_scanned,
             files_scanned=total_files_scanned,
             scan_duration=scan_duration,
-            cache_stats=self.cache_manager.get_stats() if self.cache_manager else None
+            cache_stats=self.cache_manager.get_cache_stats() if self.cache_manager else None
         )
 
     def _scan_sequential(self) -> ScanResults:
@@ -769,6 +908,12 @@ class GitHubIOCScanner:
             else:
                 return self._scan_lockfiles_only(repo, ioc_hash)
             
+        except AuthenticationError as e:
+            logger.warning(f"Access denied to repository {repo.full_name}: {e}")
+            return [], 0
+        except NetworkError as e:
+            logger.warning(f"Network error scanning repository {repo.full_name} (after retries): {e}")
+            return [], 0
         except Exception as e:
             logger.error(f"Failed to scan repository {repo.full_name}: {e}")
             return [], 0

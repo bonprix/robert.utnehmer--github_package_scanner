@@ -185,6 +185,35 @@ Authentication:
             help="Path to GitHub App configuration file (enables GitHub App authentication)",
         )
 
+        # Resume/checkpoint options
+        resume_group = parser.add_argument_group("resume and checkpointing")
+        
+        resume_group.add_argument(
+            "--resume",
+            type=str,
+            metavar="SCAN_ID",
+            help="Resume a previous scan using its scan ID",
+        )
+        
+        resume_group.add_argument(
+            "--list-scans",
+            action="store_true",
+            help="List available scans that can be resumed",
+        )
+        
+        resume_group.add_argument(
+            "--save-state",
+            action="store_true",
+            default=True,
+            help="Save scan state for resumability (default: enabled)",
+        )
+        
+        resume_group.add_argument(
+            "--no-save-state",
+            action="store_true",
+            help="Disable scan state saving",
+        )
+
         # Cache management options
         cache_group = parser.add_argument_group("cache management")
         
@@ -317,6 +346,10 @@ Authentication:
             disable_sbom=parsed_args.disable_sbom,
             sbom_only=getattr(parsed_args, 'sbom_only', False),
             github_app_config=getattr(parsed_args, 'github_app_config', None),
+            resume=getattr(parsed_args, 'resume', None),
+            list_scans=getattr(parsed_args, 'list_scans', False),
+            save_state=not getattr(parsed_args, 'no_save_state', False),
+            no_save_state=getattr(parsed_args, 'no_save_state', False),
             clear_cache=parsed_args.clear_cache,
             clear_cache_type=parsed_args.clear_cache_type,
             refresh_repo=parsed_args.refresh_repo,
@@ -342,7 +375,7 @@ Authentication:
         """
         errors = []
 
-        # Check if this is a cache-only operation
+        # Check if this is a cache-only or resume-only operation
         is_cache_only = any([
             config.cache_info,
             config.clear_cache,
@@ -351,8 +384,13 @@ Authentication:
             config.cleanup_cache is not None
         ])
         
-        # Organization is required for all scan modes (but not cache-only operations)
-        if not config.org and not is_cache_only:
+        is_resume_only = any([
+            config.list_scans,
+            config.resume is not None
+        ])
+        
+        # Organization is required for all scan modes (but not cache-only or resume-only operations)
+        if not config.org and not is_cache_only and not is_resume_only:
             errors.append(ValidationError("--org is required for all scan modes", field="org"))
 
         # Team requires organization
@@ -1028,6 +1066,104 @@ def main() -> None:
                 if not config.quiet:
                     print(f"✅ Cleaned up old cache entries: removed {count:,} entries")
                 return
+        
+        # Handle resume and scan listing commands
+        if config.list_scans:
+            from .resume_cli import list_resumable_scans
+            list_resumable_scans()
+            return
+        
+        if config.resume:
+            from .resume_cli import show_resume_info
+            from .scan_state import ScanStateManager
+            
+            if not show_resume_info(config.resume):
+                return
+            
+            # Load the scan state
+            state_manager = ScanStateManager()
+            scan_state = state_manager.load_state(config.resume)
+            
+            if not scan_state:
+                print(f"\n❌ Could not load scan state for ID: {config.resume}")
+                return
+            
+            print(f"\n🔄 Resuming scan: {config.resume}")
+            print(f"   Organization: {scan_state.org}")
+            print(f"   Scan type: {scan_state.scan_type}")
+            print(f"   Progress: {scan_state.repositories_scanned}/{scan_state.total_repositories} repositories")
+            
+            # Create a new config from the saved state
+            config_dict = scan_state.config.copy()
+            config_dict.update({
+                'org': scan_state.org,
+                'team_first_org': scan_state.scan_type == 'team-first-org',
+                'team': scan_state.target if scan_state.scan_type == 'team' else None,
+                'repo': scan_state.target if scan_state.scan_type == 'repo' else None,
+            })
+            
+            resumed_config = ScanConfig(**config_dict)
+            
+            # Resume the scan
+            try:
+                from .scanner import GitHubIOCScanner
+                from .github_client import GitHubClient
+                from .cache import CacheManager
+                from .ioc_loader import IOCLoader
+                
+                # Initialize required components
+                github_client = GitHubClient(
+                    github_app_config=resumed_config.github_app_config,
+                    org=resumed_config.org
+                )
+                cache_manager = CacheManager()
+                ioc_loader = IOCLoader(resumed_config.issues_dir)
+                
+                # Initialize scanner
+                scanner = GitHubIOCScanner(
+                    resumed_config,
+                    github_client,
+                    cache_manager,
+                    ioc_loader,
+                    enable_sbom_scanning=resumed_config.enable_sbom and not resumed_config.disable_sbom
+                )
+                
+                # Set up resume state in scanner
+                scanner.resume_state = scan_state
+                
+                print(f"\n🚀 Starting resumed scan...")
+                start_time = time.time()
+                
+                results = scanner.scan()
+                
+                duration = time.time() - start_time
+                
+                # Display results
+                self.display_results(results, resumed_config, duration)
+                
+                # Clean up completed scan state
+                state_manager.cleanup_completed_scan(config.resume)
+                
+                print(f"\n✅ Resumed scan completed successfully!")
+                
+            except Exception as e:
+                print(f"\n❌ Resume failed: {e}")
+                logger.error(f"Resume failed for scan {config.resume}: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            return
+        
+        # Suggest resume if available scans exist
+        if config.org and not config.resume:
+            scan_type = 'team-first-org' if config.team_first_org else 'org'
+            if config.team:
+                scan_type = 'team'
+            elif config.repo:
+                scan_type = 'repo'
+            
+            from .resume_cli import suggest_resume_if_available
+            suggest_resume_if_available(config.org, scan_type)
         
         # Initialize components for scanning
         try:

@@ -213,7 +213,7 @@ class GitHubAppAuth:
         # Check if we have a valid cached token
         if (self._installation_token and 
             self._token_expires_at and 
-            datetime.now() < self._token_expires_at - timedelta(minutes=5)):
+            datetime.now().replace(tzinfo=None) < self._token_expires_at.replace(tzinfo=None) - timedelta(minutes=5)):
             logger.debug("Using cached installation token")
             return self._installation_token
         
