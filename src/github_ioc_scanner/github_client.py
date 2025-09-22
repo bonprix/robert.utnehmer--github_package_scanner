@@ -844,12 +844,14 @@ class GitHubClient:
                     if fast_mode and "/" in file_info.path:
                         continue
                         
-                    # Check if file matches any pattern
+                    # Intelligent filename-based matching (covers all locations)
                     filename = file_info.path.split("/")[-1]  # Get just the filename
-                    for pattern in patterns:
-                        if self._matches_pattern(filename, pattern):
-                            matching_files.append(file_info)
-                            break
+                    
+                    # Check if filename matches any of our target files
+                    # This automatically covers ALL possible directory structures
+                    if filename in patterns:
+                        matching_files.append(file_info)
+                        continue
                 except (AttributeError, TypeError) as e:
                     logger.warning(f"Invalid file info in tree for {repo.full_name}: {e}")
                     continue
@@ -876,6 +878,53 @@ class GitHubClient:
         else:
             # Exact match
             return filename == pattern
+    
+    def _create_filename_set(self, patterns: List[str]) -> set:
+        """Create a set of filenames for O(1) lookup."""
+        # Since we now use only filenames, convert list to set for fast lookup
+        return set(patterns)
+    
+    def _path_pattern_match(self, full_path: str, patterns: List[str]) -> bool:
+        """Check path patterns (slower, only used when filename match fails)."""
+        import fnmatch
+        
+        for pattern in patterns:
+            if "/" in pattern:  # Only check path patterns
+                if pattern.startswith("*/") or pattern.startswith("**/"):
+                    # Wildcard path pattern like */yarn.lock or **/yarn.lock
+                    if fnmatch.fnmatch(full_path, pattern):
+                        return True
+                elif full_path.endswith("/" + pattern) or full_path == pattern:
+                    # Exact path match like src/yarn.lock
+                    return True
+                else:
+                    # Check if pattern matches any part of the path
+                    if fnmatch.fnmatch(full_path, "*/" + pattern) or fnmatch.fnmatch(full_path, pattern):
+                        return True
+        
+        return False
+    
+    def _matches_file_pattern(self, full_path: str, filename: str, pattern: str) -> bool:
+        """Check if a file matches a pattern, supporting both filename and path patterns."""
+        import fnmatch
+        
+        # If pattern contains a slash, it's a path pattern
+        if "/" in pattern:
+            # For path patterns, check if the full path ends with the pattern
+            # or if the pattern matches the full path
+            if pattern.startswith("*/") or pattern.startswith("**/"):
+                # Wildcard path pattern like */yarn.lock or **/yarn.lock
+                return fnmatch.fnmatch(full_path, pattern)
+            elif full_path.endswith("/" + pattern) or full_path == pattern:
+                # Exact path match like src/yarn.lock
+                return True
+            else:
+                # Check if pattern matches any part of the path
+                # For example, pattern "src/yarn.lock" should match "some/path/src/yarn.lock"
+                return fnmatch.fnmatch(full_path, "*/" + pattern) or fnmatch.fnmatch(full_path, pattern)
+        else:
+            # For filename-only patterns, just match the filename
+            return self._matches_pattern(filename, pattern)
 
     def get_file_content(
         self, repo: Repository, path: str, etag: Optional[str] = None

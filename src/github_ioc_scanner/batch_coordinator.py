@@ -90,6 +90,10 @@ class BatchCoordinator:
                 logger.info(f"Waiting for {len(self.active_operations)} active operations to complete")
                 await self._wait_for_active_operations()
             
+            # Close the GitHub client session
+            if self.github_client:
+                await self.github_client.aclose()
+            
             await self.cache_coordinator.stop()
             logger.info("Batch coordinator stopped successfully")
         except Exception as e:
@@ -124,10 +128,17 @@ class BatchCoordinator:
         try:
             logger.info(f"Processing batch of {len(repositories)} repositories with strategy {strategy or self.current_strategy}")
             
-            # For very large repository counts, use chunked processing to avoid memory/performance issues
+            # For very large repository counts, use different strategies based on scan type
             if len(repositories) > 1000:
-                logger.info(f"Large repository count ({len(repositories)}), using chunked processing")
-                return await self._process_repositories_chunked(repositories, strategy, file_patterns)
+                if self._is_team_first_org_scan():
+                    logger.info(f"Large team-first-org scan ({len(repositories)} repos), using simplified processing")
+                    # Skip expensive cross-repo analysis for team-first-org scans
+                    return await self._process_repositories_sequentially(
+                        repositories, strategy or BatchStrategy.CONSERVATIVE, file_patterns
+                    )
+                else:
+                    logger.info(f"Large repository count ({len(repositories)}), using chunked processing")
+                    return await self._process_repositories_chunked(repositories, strategy, file_patterns)
             
             # Step 1: Analyze repositories for cross-repo batching opportunities
             cross_repo_opportunities = await self._analyze_cross_repo_opportunities(repositories)
@@ -262,7 +273,8 @@ class BatchCoordinator:
                 )
                 
                 # Run the synchronous discovery in a thread pool
-                repositories = await asyncio.get_event_loop().run_in_executor(
+                loop = asyncio.get_running_loop()
+                repositories = await loop.run_in_executor(
                     None, sync_discovery
                 )
                 
@@ -1143,6 +1155,12 @@ class BatchCoordinator:
         logger.info(f"🎯 Chunked processing completed: {len(all_results)} total repositories processed")
         return all_results
     
+    def _is_team_first_org_scan(self) -> bool:
+        """Check if this is a team-first organization scan that should preserve team grouping."""
+        if hasattr(self, 'scanner') and self.scanner and hasattr(self.scanner, 'config'):
+            return getattr(self.scanner.config, 'team_first_org', False)
+        return False
+    
     async def _process_single_repository_batch(
         self,
         repository: Repository,
@@ -1229,12 +1247,16 @@ class BatchCoordinator:
             if file_patterns:
                 search_patterns = file_patterns
             else:
-                # Default patterns for package manager files
-                search_patterns = [
-                    'package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
-                    'requirements.txt', 'Pipfile.lock', 'poetry.lock', 'pyproject.toml',
-                    'Gemfile.lock', 'composer.lock', 'go.mod', 'go.sum', 'Cargo.lock'
-                ]
+                # Get the full patterns from the scanner if available
+                if hasattr(self, 'scanner') and self.scanner:
+                    search_patterns = self.scanner._get_scan_patterns()
+                else:
+                    # Default patterns for package manager files
+                    search_patterns = [
+                        'package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb',
+                        'requirements.txt', 'Pipfile.lock', 'poetry.lock', 'pyproject.toml',
+                        'Gemfile.lock', 'composer.lock', 'go.mod', 'go.sum', 'Cargo.lock'
+                    ]
             
             logger.debug(f"Using tree API to search for {len(search_patterns)} file patterns in {repository.full_name}")
             
@@ -1245,6 +1267,8 @@ class BatchCoordinator:
                 if not tree_response.data:
                     logger.debug(f"No tree data returned for {repository.full_name}, falling back to individual file checks")
                     return await self._discover_repository_files_fallback(repository, file_patterns)
+                
+                logger.debug(f"Tree API returned {len(tree_response.data) if isinstance(tree_response.data, list) else 'unknown'} entries for {repository.full_name}")
                 
                 # Filter tree entries for matching filenames
                 found_files = []
@@ -1261,21 +1285,26 @@ class BatchCoordinator:
                     return []
                 
                 logger.debug(f"Processing {len(tree_entries)} tree entries for {len(search_patterns)} target patterns")
+                logger.debug(f"First few search patterns: {search_patterns[:5]}")
+                
+                # Debug: Show first few tree entries
+                if tree_entries:
+                    sample_entries = []
+                    for entry in tree_entries[:5]:
+                        if hasattr(entry, 'path'):
+                            sample_entries.append(entry.path)
+                        elif isinstance(entry, dict) and 'path' in entry:
+                            sample_entries.append(entry['path'])
+                    logger.debug(f"Sample tree entries: {sample_entries}")
                 
                 for entry in tree_entries:
                     # Handle FileInfo objects (which is what we're getting)
                     if hasattr(entry, 'path'):
                         entry_path = entry.path
                         # Check if the file path matches any of our search patterns
+                        filename = entry_path.split('/')[-1]
                         for pattern in search_patterns:
-                            # More flexible matching:
-                            # 1. Exact match (e.g., "package.json")
-                            # 2. Ends with pattern (e.g., "frontend/package.json")
-                            # 3. Filename matches pattern (e.g., "some/deep/path/package.json")
-                            filename = entry_path.split('/')[-1]
-                            if (entry_path == pattern or 
-                                entry_path.endswith('/' + pattern) or 
-                                filename == pattern):
+                            if self._matches_file_pattern(entry_path, filename, pattern):
                                 found_files.append(entry_path)
                                 break  # Don't add the same file multiple times
                     elif isinstance(entry, dict):
@@ -1285,9 +1314,7 @@ class BatchCoordinator:
                             filename = entry_path.split('/')[-1]
                             # Check if the file path matches any of our search patterns
                             for pattern in search_patterns:
-                                if (entry_path == pattern or 
-                                    entry_path.endswith('/' + pattern) or 
-                                    filename == pattern):
+                                if self._matches_file_pattern(entry_path, filename, pattern):
                                     found_files.append(entry_path)
                                     break
                     else:
@@ -1304,6 +1331,28 @@ class BatchCoordinator:
         except Exception as e:
             logger.warning(f"Failed to discover files in {repository.full_name}: {e}")
             return []
+    
+    def _matches_file_pattern(self, full_path: str, filename: str, pattern: str) -> bool:
+        """Check if a file matches a pattern, supporting both filename and path patterns."""
+        import fnmatch
+        
+        # If pattern contains a slash, it's a path pattern
+        if "/" in pattern:
+            # For path patterns, check if the full path ends with the pattern
+            # or if the pattern matches the full path
+            if pattern.startswith("*/") or pattern.startswith("**/"):
+                # Wildcard path pattern like */yarn.lock or **/yarn.lock
+                return fnmatch.fnmatch(full_path, pattern)
+            elif full_path.endswith("/" + pattern) or full_path == pattern:
+                # Exact path match like src/yarn.lock
+                return True
+            else:
+                # Check if pattern matches any part of the path
+                # For example, pattern "src/yarn.lock" should match "some/path/src/yarn.lock"
+                return fnmatch.fnmatch(full_path, "*/" + pattern) or fnmatch.fnmatch(full_path, pattern)
+        else:
+            # For filename-only patterns, just match the filename
+            return filename == pattern or fnmatch.fnmatch(filename, pattern)
     
     async def _discover_repository_files_fallback(
         self,
@@ -1406,9 +1455,18 @@ class BatchCoordinator:
         ioc_matches = []
         
         try:
-            # Load IOC definitions (we should cache this, but for now load fresh)
-            ioc_loader = IOCLoader()
-            ioc_definitions = ioc_loader.load_iocs()
+            # Load IOC definitions (cached for performance)
+            if not hasattr(self, '_cached_ioc_definitions'):
+                # Get the issues directory from the scanner if available
+                issues_dir = "issues"  # Default
+                if hasattr(self, 'scanner') and self.scanner and hasattr(self.scanner, 'config'):
+                    issues_dir = self.scanner.config.issues_dir or "issues"
+                
+                ioc_loader = IOCLoader(issues_dir)
+                self._cached_ioc_definitions = ioc_loader.load_iocs()
+                logger.debug(f"Cached IOC definitions from {issues_dir}")
+            
+            ioc_definitions = self._cached_ioc_definitions
             
             # Process each file
             files = file_results.get('files', {})

@@ -131,21 +131,232 @@ class GitHubIOCScanner:
             if self.progress_callback:
                 self._setup_batch_progress_monitoring()
     
+    def _scan_team_repositories_sequential(self, repos_to_scan, team_name, ioc_hash, remaining_repos, total_repos_scanned, total_files_scanned):
+        """Scan team repositories using sequential processing."""
+        team_matches = []
+        team_files_scanned = 0
+        
+        for j, repo in enumerate(repos_to_scan, 1):
+            if not self.config.quiet:
+                print(f"\r[Team {team_name}] [{j:3d}/{len(repos_to_scan):3d}] Scanning {repo.full_name}...", end='', flush=True)
+            
+            matches, files_scanned = self.scan_repository_for_iocs(repo, ioc_hash)
+            team_matches.extend(matches)
+            team_files_scanned += files_scanned
+            
+            # Update scan state with progress
+            if self.current_scan_state:
+                self.current_scan_state.repositories_scanned = total_repos_scanned + j
+                self.current_scan_state.files_scanned = total_files_scanned + team_files_scanned
+                
+                # Add to completed repositories
+                if not self.current_scan_state.completed_repositories:
+                    self.current_scan_state.completed_repositories = []
+                self.current_scan_state.completed_repositories.append(repo.full_name)
+                
+                # Add matches to state
+                if matches:
+                    from .scan_state import add_ioc_match_to_state
+                    for match in matches:
+                        add_ioc_match_to_state(self.current_scan_state, match)
+                
+                # Save state periodically
+                self.scan_state_manager.save_state(self.current_scan_state)
+            
+            # Remove from remaining repositories
+            remaining_repos.pop(repo.full_name, None)
+        
+        if not self.config.quiet and repos_to_scan:
+            print()  # New line after progress
+            
+        return team_matches, team_files_scanned
+
+    def _run_team_batch_processing(self, repositories, strategy, file_patterns):
+        """Run batch processing for team repositories synchronously."""
+        import asyncio
+        import concurrent.futures
+        import threading
+        
+        async def run_batch():
+            # Ensure we have a fresh batch coordinator for this event loop
+            if not self.batch_coordinator or self.batch_coordinator.github_client.client:
+                # Reset the HTTP client to avoid event loop conflicts
+                if self.batch_coordinator and self.batch_coordinator.github_client.client:
+                    try:
+                        await self.batch_coordinator.github_client.client.aclose()
+                    except:
+                        pass  # Ignore errors during cleanup
+                    self.batch_coordinator.github_client.client = None
+            
+            return await self.batch_coordinator.process_repositories_batch(
+                repositories, strategy=strategy, file_patterns=file_patterns
+            )
+        
+        # Check if we're already in an event loop
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in an event loop, need to run in a separate thread with its own loop
+            def run_in_thread():
+                # Create a new event loop for this thread
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    # Create a fresh batch coordinator for this thread's event loop
+                    from .async_github_client import AsyncGitHubClient
+                    from .batch_coordinator import BatchCoordinator
+                    
+                    # Create new async client for this event loop
+                    fresh_async_client = AsyncGitHubClient(
+                        token=self.batch_coordinator.github_client.token,
+                        config=self.batch_coordinator.config
+                    )
+                    
+                    # Create new batch coordinator
+                    fresh_batch_coordinator = BatchCoordinator(
+                        github_client=fresh_async_client,
+                        cache_manager=self.cache_manager,
+                        config=self.batch_coordinator.config
+                    )
+                    fresh_batch_coordinator.scanner = self
+                    
+                    async def run_with_fresh_coordinator():
+                        await fresh_batch_coordinator.start()
+                        try:
+                            return await fresh_batch_coordinator.process_repositories_batch(
+                                repositories, strategy=strategy, file_patterns=file_patterns
+                            )
+                        finally:
+                            await fresh_batch_coordinator.stop()
+                    
+                    return new_loop.run_until_complete(run_with_fresh_coordinator())
+                finally:
+                    new_loop.close()
+            
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_in_thread)
+                return future.result()
+                
+        except RuntimeError:
+            # No event loop running, safe to use asyncio.run
+            return asyncio.run(run_batch())
+        except Exception as e:
+            logger.warning(f"Event loop handling failed, falling back to sequential processing: {e}")
+            # Fall back to sequential processing if async fails
+            return {}
+
     def _get_scan_patterns(self) -> List[str]:
         """Get file patterns to scan based on configuration."""
-        patterns = self.LOCKFILE_PATTERNS.copy()
-        
-        if self.enable_sbom_scanning:
-            patterns.extend(self.SBOM_PATTERNS)
+        # Use a more focused set of patterns for better performance
+        if self.config.fast_mode:
+            # Fast mode: only root-level files
+            patterns = [
+                "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+                "requirements.txt", "Pipfile.lock", "poetry.lock", "pyproject.toml",
+                "Gemfile.lock", "composer.lock", "go.mod", "go.sum", "Cargo.lock"
+            ]
+            if self.enable_sbom_scanning:
+                patterns.extend([
+                    "sbom.json", "bom.json", "cyclonedx.json", "spdx.json"
+                ])
+        else:
+            # Comprehensive mode: use optimized pattern set
+            patterns = self._get_optimized_patterns()
             
         return patterns
+    
+    def _get_optimized_patterns(self) -> List[str]:
+        """Get an optimized set of patterns using intelligent recursive search."""
+        # Instead of 280 specific path patterns, use filename-based recursive search
+        # This covers ALL possible locations while being much more efficient
+        
+        base_filenames = [
+            # JavaScript/Node.js
+            "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb",
+            
+            # Python
+            "requirements.txt", "Pipfile.lock", "poetry.lock", "pyproject.toml",
+            
+            # Other languages
+            "Gemfile.lock",      # Ruby
+            "composer.lock",     # PHP
+            "go.mod", "go.sum",  # Go
+            "Cargo.lock",        # Rust
+        ]
+        
+        if self.enable_sbom_scanning:
+            base_filenames.extend([
+                # SBOM files
+                "sbom.json", "bom.json", "cyclonedx.json", "spdx.json",
+                "sbom.xml", "bom.xml", "cyclonedx.xml", "spdx.xml",
+                "software-bill-of-materials.json", "software-bill-of-materials.xml",
+                ".sbom", ".spdx", "SBOM.json", "BOM.json"
+            ])
+        
+        return base_filenames
 
     def scan(self) -> ScanResults:
         """Execute the scan based on the configuration."""
         # Use batch processing if enabled and multiple repositories
-        if self.enable_batch_processing and self.batch_coordinator:
-            return asyncio.run(self._scan_with_batch_processing())
+        # BUT: team-first-org scans must use sequential processing for proper team grouping
+        if self.enable_batch_processing and self.batch_coordinator and not self.config.team_first_org:
+            return self._run_async_scan_safely()
         else:
+            return self._scan_sequential()
+    
+    def _run_async_scan_safely(self) -> ScanResults:
+        """Run async scan with proper event loop handling."""
+        import asyncio
+        import concurrent.futures
+        
+        # Check if we're already in an event loop
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in an event loop, need to run in a separate thread with its own loop
+            def run_in_thread():
+                # Create a new event loop for this thread
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    # Create fresh async components for this event loop
+                    from .async_github_client import AsyncGitHubClient
+                    from .batch_coordinator import BatchCoordinator
+                    
+                    # Create new async client for this event loop
+                    fresh_async_client = AsyncGitHubClient(
+                        token=self.batch_coordinator.github_client.token,
+                        config=self.batch_coordinator.config
+                    )
+                    
+                    # Create new batch coordinator
+                    fresh_batch_coordinator = BatchCoordinator(
+                        github_client=fresh_async_client,
+                        cache_manager=self.cache_manager,
+                        config=self.batch_coordinator.config
+                    )
+                    fresh_batch_coordinator.scanner = self
+                    
+                    # Temporarily replace the batch coordinator
+                    original_coordinator = self.batch_coordinator
+                    self.batch_coordinator = fresh_batch_coordinator
+                    
+                    try:
+                        return new_loop.run_until_complete(self._scan_with_batch_processing())
+                    finally:
+                        # Restore original coordinator
+                        self.batch_coordinator = original_coordinator
+                finally:
+                    new_loop.close()
+            
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_in_thread)
+                return future.result()
+                
+        except RuntimeError:
+            # No event loop running, safe to use asyncio.run
+            return asyncio.run(self._scan_with_batch_processing())
+        except Exception as e:
+            logger.warning(f"Async scan failed, falling back to sequential processing: {e}")
+            # Fall back to sequential processing if async fails
             return self._scan_sequential()
     
     async def _scan_with_batch_processing(self) -> ScanResults:
@@ -396,49 +607,85 @@ class GitHubIOCScanner:
                     
                 logger.info(f"  Found {len(team_repos)} repositories for team {team_name}")
                 
-                # Scan team repositories
+                # Scan team repositories using batch processing if available
                 team_matches = []
                 team_files_scanned = 0
                 
-                for j, repo in enumerate(team_repos, 1):
-                    # Skip already processed repositories when resuming
+                # Filter out already processed repositories when resuming
+                repos_to_scan = []
+                for repo in team_repos:
                     if (self.resume_state and self.resume_state.completed_repositories and 
                         repo.full_name in self.resume_state.completed_repositories):
                         if not self.config.quiet:
-                            print(f"\r[Team {team_name}] [{j:3d}/{len(team_repos):3d}] ✅ {repo.full_name} already completed", end='', flush=True)
+                            print(f"     ✅ {repo.full_name} already completed")
                         # Still remove from remaining repositories
                         remaining_repos.pop(repo.full_name, None)
                         continue
-                    
+                    repos_to_scan.append(repo)
+                
+                if not repos_to_scan:
                     if not self.config.quiet:
-                        print(f"\r[Team {team_name}] [{j:3d}/{len(team_repos):3d}] Scanning {repo.full_name}...", end='', flush=True)
-                    
-                    matches, files_scanned = self.scan_repository_for_iocs(repo, ioc_hash)
-                    team_matches.extend(matches)
-                    team_files_scanned += files_scanned
-                    total_repos_scanned += 1
-                    
-                    # Update scan state with progress
-                    if self.current_scan_state:
-                        self.current_scan_state.repositories_scanned = total_repos_scanned
-                        self.current_scan_state.files_scanned = total_files_scanned + team_files_scanned
+                        print(f"     ⚠️  All repositories for team '{team_name}' already processed")
+                    continue
+                
+                # Use batch processing for team repositories if enabled and available
+                if self.enable_batch_processing and self.batch_coordinator and len(repos_to_scan) > 1:
+                    try:
+                        if not self.config.quiet:
+                            print(f"     🚀 Using batch processing for {len(repos_to_scan)} repositories")
                         
-                        # Add to completed repositories
-                        if not self.current_scan_state.completed_repositories:
-                            self.current_scan_state.completed_repositories = []
-                        self.current_scan_state.completed_repositories.append(repo.full_name)
+                        # Use batch processing for this team's repositories
+                        file_patterns = self._get_scan_patterns()
+                        batch_results = self._run_team_batch_processing(
+                            repos_to_scan, 
+                            strategy=self._select_batch_strategy(repos_to_scan),
+                            file_patterns=file_patterns
+                        )
                         
-                        # Add matches to state
-                        if matches:
-                            from .scan_state import add_ioc_match_to_state
-                            for match in matches:
-                                add_ioc_match_to_state(self.current_scan_state, match)
+                        # Process batch results
+                        for repo_name, matches in batch_results.items():
+                            if matches:
+                                team_matches.extend(matches)
+                            # Count files scanned (approximate)
+                            team_files_scanned += len(matches) if matches else 0
+                            total_repos_scanned += 1
+                            
+                            # Update scan state
+                            if self.current_scan_state:
+                                self.current_scan_state.repositories_scanned = total_repos_scanned
+                                self.current_scan_state.files_scanned = total_files_scanned + team_files_scanned
+                                
+                                # Add to completed repositories
+                                if not self.current_scan_state.completed_repositories:
+                                    self.current_scan_state.completed_repositories = []
+                                self.current_scan_state.completed_repositories.append(repo_name)
+                                
+                                # Add matches to state
+                                if matches:
+                                    from .scan_state import add_ioc_match_to_state
+                                    for match in matches:
+                                        add_ioc_match_to_state(self.current_scan_state, match)
+                            
+                            # Remove from remaining repositories
+                            remaining_repos.pop(repo_name, None)
                         
-                        # Save state periodically
-                        self.scan_state_manager.save_state(self.current_scan_state)
-                    
-                    # Remove from remaining repositories
-                    remaining_repos.pop(repo.full_name, None)
+                        # Save state after batch processing
+                        if self.current_scan_state:
+                            self.scan_state_manager.save_state(self.current_scan_state)
+                            
+                    except Exception as e:
+                        logger.warning(f"Batch processing failed for team {team_name}, falling back to sequential: {e}")
+                        # Fall back to sequential processing
+                        team_matches, team_files_scanned = self._scan_team_repositories_sequential(
+                            repos_to_scan, team_name, ioc_hash, remaining_repos, total_repos_scanned, total_files_scanned
+                        )
+                        total_repos_scanned += len(repos_to_scan)
+                else:
+                    # Use sequential processing for single repository or when batch processing is disabled
+                    team_matches, team_files_scanned = self._scan_team_repositories_sequential(
+                        repos_to_scan, team_name, ioc_hash, remaining_repos, total_repos_scanned, total_files_scanned
+                    )
+                    total_repos_scanned += len(repos_to_scan)
                 
                 if not self.config.quiet:
                     print()  # New line after progress

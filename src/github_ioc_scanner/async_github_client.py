@@ -49,6 +49,25 @@ class AsyncGitHubClient:
         self.config = config or BatchConfig()
         self.client: Optional[httpx.AsyncClient] = None
         self._session_lock = asyncio.Lock()
+    
+    async def aclose(self) -> None:
+        """Close the async HTTP client session."""
+        async with self._session_lock:
+            if self.client and not self.client.is_closed:
+                try:
+                    await self.client.aclose()
+                except Exception as e:
+                    logger.debug(f"Error closing HTTP client: {e}")
+                finally:
+                    self.client = None
+    
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.aclose()
         
     def _discover_token(self) -> str:
         """Discover GitHub token from environment or gh CLI."""
@@ -191,6 +210,14 @@ class AsyncGitHubClient:
         except (RateLimitError, AuthenticationError, APIError, NetworkError):
             # These are expected exceptions that should be re-raised as-is
             raise
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e):
+                logger.warning(f"Event loop closed during request to {url}, request cancelled")
+                # Return empty response for closed event loop
+                return APIResponse(data=None)
+            else:
+                log_exception(logger, f"Runtime error making request to {url}", e)
+                raise wrap_exception(e, f"Runtime error making request to {url}")
         except Exception as e:
             log_exception(logger, f"Unexpected error making request to {url}", e)
             raise wrap_exception(e, f"Unexpected error making request to {url}")
