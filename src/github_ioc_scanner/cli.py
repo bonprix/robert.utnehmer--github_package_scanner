@@ -59,6 +59,15 @@ Examples:
   # Custom log file location
   github-ioc-scan --org myorg --log-file /path/to/scan.log
 
+  # Enable detailed rate limit debugging
+  github-ioc-scan --org myorg --debug-rate-limits
+
+  # Show full stack traces for all errors
+  github-ioc-scan --org myorg --show-stack-traces
+
+  # Suppress rate limit user messages completely
+  github-ioc-scan --org myorg --suppress-rate-limit-messages
+
 Cache Management:
   # Display cache information
   github-ioc-scan --cache-info
@@ -272,6 +281,24 @@ Authentication:
             action="store_true",
             help="Suppress all output except IOC matches and errors",
         )
+        
+        output_group.add_argument(
+            "--debug-rate-limits",
+            action="store_true",
+            help="Enable detailed rate limit debugging information",
+        )
+        
+        output_group.add_argument(
+            "--show-stack-traces",
+            action="store_true",
+            help="Show full stack traces for all errors (overrides suppression)",
+        )
+        
+        output_group.add_argument(
+            "--suppress-rate-limit-messages",
+            action="store_true",
+            help="Completely suppress rate limit user messages",
+        )
 
         # Batch processing options
         batch_group = parser.add_argument_group("batch processing")
@@ -329,6 +356,32 @@ Authentication:
             help="Path to batch configuration file (JSON format)",
         )
 
+        # Rate limiting options
+        rate_limit_group = parser.add_argument_group("rate limiting")
+        
+        rate_limit_group.add_argument(
+            "--rate-limit-strategy",
+            type=str,
+            choices=["conservative", "normal", "aggressive"],
+            default="normal",
+            help="Rate limiting strategy: conservative (prioritize avoiding limits), "
+                 "normal (balanced approach), aggressive (maximize throughput)",
+        )
+        
+        rate_limit_group.add_argument(
+            "--disable-intelligent-rate-limiting",
+            action="store_true",
+            help="Disable intelligent rate limit prevention and budget distribution",
+        )
+        
+        rate_limit_group.add_argument(
+            "--rate-limit-safety-margin",
+            type=int,
+            default=50,
+            metavar="N",
+            help="Number of requests to keep in reserve (default: 50)",
+        )
+
         # Parse arguments (use provided args for testing, otherwise parse from sys.argv)
         parsed_args = parser.parse_args(args)
 
@@ -370,12 +423,18 @@ Authentication:
             verbose=getattr(parsed_args, 'verbose', False),
             log_file=getattr(parsed_args, 'log_file', None),
             quiet=getattr(parsed_args, 'quiet', False),
+            debug_rate_limits=getattr(parsed_args, 'debug_rate_limits', False),
+            show_stack_traces=getattr(parsed_args, 'show_stack_traces', False),
+            suppress_rate_limit_messages=getattr(parsed_args, 'suppress_rate_limit_messages', False),
             enable_batch_processing=not getattr(parsed_args, 'disable_batch_processing', False),
             batch_size=getattr(parsed_args, 'batch_size', None),
             max_concurrent=getattr(parsed_args, 'max_concurrent', None),
             batch_strategy=getattr(parsed_args, 'batch_strategy', None),
             enable_cross_repo_batching=enable_cross_repo,
             batch_config_file=getattr(parsed_args, 'batch_config', None),
+            rate_limit_strategy=getattr(parsed_args, 'rate_limit_strategy', 'normal'),
+            enable_intelligent_rate_limiting=not getattr(parsed_args, 'disable_intelligent_rate_limiting', False),
+            rate_limit_safety_margin=getattr(parsed_args, 'rate_limit_safety_margin', 50),
         )
 
     def validate_arguments(self, config: ScanConfig) -> bool:
@@ -1008,12 +1067,29 @@ def main() -> None:
         # Configure logging based on user preferences
         log_file = config.log_file or "github-ioc-scan.log"
         
+        # Determine logging configuration
+        debug_rate_limits = config.debug_rate_limits
+        suppress_stack_traces = not config.show_stack_traces
+        separate_user_messages = not config.suppress_rate_limit_messages
+        
         if config.verbose:
             # Verbose mode: show detailed logs on console
-            setup_logging(level="INFO", log_file=log_file)
+            setup_logging(
+                level="INFO", 
+                log_file=log_file,
+                debug_rate_limits=debug_rate_limits,
+                suppress_stack_traces=suppress_stack_traces,
+                separate_user_messages=separate_user_messages
+            )
         elif config.quiet:
             # Quiet mode: only critical errors on console, everything to file
-            setup_logging(level="CRITICAL", log_file=log_file)
+            setup_logging(
+                level="CRITICAL", 
+                log_file=log_file,
+                debug_rate_limits=debug_rate_limits,
+                suppress_stack_traces=suppress_stack_traces,
+                separate_user_messages=False  # No user messages in quiet mode
+            )
             # Set file handler to capture all logs
             import logging
             file_logger = logging.getLogger()
@@ -1022,7 +1098,13 @@ def main() -> None:
                     handler.setLevel(logging.DEBUG)
         else:
             # Normal mode: minimal console output, detailed file logging
-            setup_logging(level="ERROR", log_file=log_file)
+            setup_logging(
+                level="ERROR", 
+                log_file=log_file,
+                debug_rate_limits=debug_rate_limits,
+                suppress_stack_traces=suppress_stack_traces,
+                separate_user_messages=separate_user_messages
+            )
             # Set file handler to capture all logs
             import logging
             file_logger = logging.getLogger()
@@ -1211,6 +1293,18 @@ def main() -> None:
             # Determine SBOM scanning configuration
             enable_sbom_scanning = config.enable_sbom and not config.disable_sbom
             
+            # Create batch configuration with rate limiting settings
+            from .batch_models import BatchConfig
+            batch_config = None
+            if config.enable_batch_processing:
+                batch_config = BatchConfig(
+                    rate_limit_strategy=config.rate_limit_strategy,
+                    enable_proactive_rate_limiting=config.enable_intelligent_rate_limiting,
+                    rate_limit_safety_margin=config.rate_limit_safety_margin,
+                    enable_budget_distribution=config.enable_intelligent_rate_limiting,
+                    enable_adaptive_timing=config.enable_intelligent_rate_limiting
+                )
+            
             # Initialize scanner with progress callback and SBOM options
             scanner = GitHubIOCScanner(
                 config, 
@@ -1218,6 +1312,7 @@ def main() -> None:
                 cache_manager, 
                 ioc_loader, 
                 progress_callback,
+                batch_config=batch_config,
                 enable_batch_processing=config.enable_batch_processing,
                 enable_sbom_scanning=enable_sbom_scanning
             )

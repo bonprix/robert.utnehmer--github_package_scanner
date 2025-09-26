@@ -162,7 +162,7 @@ class MemoryMonitor:
         adjusted_size = max(self.min_batch_size, min(self.max_batch_size, adjusted_size))
         
         if adjusted_size != current_batch_size:
-            logger.info(
+            logger.debug(
                 f"Adjusted batch size from {current_batch_size} to {adjusted_size} "
                 f"due to memory pressure ({memory_pressure_factor:.1%})"
             )
@@ -187,7 +187,7 @@ class MemoryMonitor:
         }
         
         if memory_freed > 1.0:  # Only log if significant memory was freed
-            logger.info(f"Garbage collection freed {memory_freed:.2f} MB")
+            logger.debug(f"Garbage collection freed {memory_freed:.2f} MB")
         
         return gc_stats
     

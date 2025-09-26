@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, AsyncIterator
 from urllib.parse import quote
 
@@ -23,12 +23,19 @@ from .exceptions import (
     wrap_exception,
     get_error_context
 )
-from .logging_config import get_logger, log_exception, log_rate_limit
+from .logging_config import (
+    get_logger, log_exception, log_rate_limit, log_user_message, 
+    log_rate_limit_debug, log_exception_with_user_message
+)
 from .models import APIResponse, FileContent, FileInfo, Repository
 from .batch_models import (
     BatchRequest, BatchResult, BatchMetrics, AsyncBatchContext,
     BatchConfig, NetworkConditions
 )
+from .rate_limit_manager import RateLimitManager
+from .error_message_formatter import ErrorMessageFormatter
+from .event_loop_context import EventLoopContext
+from .intelligent_rate_limiter import IntelligentRateLimiter, RateLimitStrategy
 
 logger = get_logger(__name__)
 
@@ -49,6 +56,20 @@ class AsyncGitHubClient:
         self.config = config or BatchConfig()
         self.client: Optional[httpx.AsyncClient] = None
         self._session_lock = asyncio.Lock()
+        self.rate_limit_manager = RateLimitManager()
+        self.error_formatter = ErrorMessageFormatter()
+        self.event_loop_context = EventLoopContext()
+        
+        # Initialize intelligent rate limiter based on config
+        strategy = RateLimitStrategy.NORMAL  # Default strategy
+        if hasattr(self.config, 'rate_limit_strategy'):
+            strategy_name = getattr(self.config, 'rate_limit_strategy', 'normal')
+            try:
+                strategy = RateLimitStrategy(strategy_name.lower())
+            except ValueError:
+                logger.warning(f"Invalid rate limit strategy '{strategy_name}', using 'normal'")
+        
+        self.intelligent_limiter = IntelligentRateLimiter(strategy)
     
     async def aclose(self) -> None:
         """Close the async HTTP client session."""
@@ -131,96 +152,209 @@ class AsyncGitHubClient:
         params: Optional[Dict[str, Any]] = None,
         **kwargs: Any
     ) -> APIResponse:
-        """Make an async request to the GitHub API with rate limiting and ETag support."""
+        """Make an async request to the GitHub API with graceful rate limit handling."""
+        return await self._make_request_with_retry(method, url, etag, params, **kwargs)
+    
+    async def _make_request_with_retry(
+        self,
+        method: str,
+        url: str,
+        etag: Optional[str] = None,
+        params: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3,
+        **kwargs: Any
+    ) -> APIResponse:
+        """Make an async request with retry logic and graceful rate limit handling."""
         headers = kwargs.pop("headers", {})
         
         # Add ETag for conditional requests
         if etag:
             headers["If-None-Match"] = etag
+        
+        # Extract repository name from URL for budget tracking
+        repo_name = self._extract_repo_name_from_url(url)
+        
+        # Clear any expired rate limits
+        self.rate_limit_manager.clear_expired_limits()
+        
+        # Intelligent rate limiting - proactive throttling
+        await self.intelligent_limiter.wait_for_budget_availability(repo_name)
+        
+        # Check if we're currently rate limited (reactive handling)
+        if self.rate_limit_manager.is_rate_limited():
+            wait_time = self.rate_limit_manager.get_wait_time()
+            if self.rate_limit_manager.should_show_message():
+                reset_time = datetime.now() + timedelta(seconds=wait_time)
+                message = self.error_formatter.format_rate_limit_message(reset_time)
+                log_user_message(logger, message)
             
-        try:
-            session = await self._get_session()
-            response = await session.request(method, url, headers=headers, params=params, **kwargs)
+            log_rate_limit_debug(logger, f"Rate limited, waiting {wait_time} seconds before request to {url}")
+            await asyncio.sleep(wait_time)
             
-
-            # Log rate limit information
-            remaining = int(response.headers.get("X-RateLimit-Remaining", 0))
-            reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
-            log_rate_limit(logger, remaining, reset_time)
-            
-            # Handle rate limiting
-            if response.status_code == 403:
-                error_message = response.text.lower()
-                if "rate limit exceeded" in error_message or "api rate limit exceeded" in error_message:
-                    reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
-                    raise RateLimitError(
-                        f"GitHub API rate limit exceeded. Resets at {datetime.fromtimestamp(reset_time)}",
-                        reset_time=reset_time
+        for attempt in range(max_retries + 1):
+            try:
+                session = await self._get_session()
+                response = await session.request(method, url, headers=headers, params=params, **kwargs)
+                
+                # Log rate limit information
+                remaining = int(response.headers.get("X-RateLimit-Remaining", 0))
+                total = int(response.headers.get("X-RateLimit-Limit", 5000))
+                reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
+                log_rate_limit(logger, remaining, reset_time)
+                
+                # Update intelligent rate limiter with current status
+                self.intelligent_limiter.update_rate_limit_status(
+                    remaining=remaining,
+                    total=total,
+                    reset_time=reset_time,
+                    repo_name=repo_name
+                )
+                
+                # Handle rate limiting
+                if response.status_code == 403:
+                    error_message = response.text.lower()
+                    if "rate limit exceeded" in error_message or "api rate limit exceeded" in error_message:
+                        reset_timestamp = int(response.headers.get("X-RateLimit-Reset", 0))
+                        reset_datetime = datetime.fromtimestamp(reset_timestamp)
+                        
+                        # Determine if this is a secondary rate limit
+                        is_secondary = "secondary rate limit" in error_message or "abuse detection" in error_message
+                        
+                        # Update rate limit manager
+                        self.rate_limit_manager.handle_rate_limit(reset_datetime, is_secondary)
+                        
+                        # Handle gracefully with exponential backoff for secondary limits
+                        if is_secondary and attempt < max_retries:
+                            backoff_time = min(2 ** attempt, 300)  # Max 5 minutes
+                            if self.rate_limit_manager.should_show_message():
+                                message = f"Secondary rate limit hit. Backing off for {backoff_time} seconds..."
+                                log_user_message(logger, message)
+                            
+                            log_rate_limit_debug(logger, f"Secondary rate limit, backing off {backoff_time}s (attempt {attempt + 1})")
+                            await asyncio.sleep(backoff_time)
+                            continue
+                        
+                        # For primary rate limits or final attempt, wait until reset
+                        await self._handle_rate_limit_gracefully(reset_datetime)
+                        continue
+                        
+                    elif "forbidden" in error_message:
+                        raise AuthenticationError("Access forbidden. Check token permissions for this resource.")
+                    else:
+                        raise APIError(f"Forbidden: {response.text}", status_code=403)
+                
+                # Handle 304 Not Modified
+                if response.status_code == 304:
+                    logger.debug(f"Resource not modified: {url}")
+                    return APIResponse(
+                        data=None,
+                        etag=etag,
+                        not_modified=True,
+                        rate_limit_remaining=remaining,
+                        rate_limit_reset=reset_time,
                     )
-                elif "forbidden" in error_message:
-                    raise AuthenticationError("Access forbidden. Check token permissions for this resource.")
-                else:
-                    raise APIError(f"Forbidden: {response.text}", status_code=403)
-            
-            # Handle 304 Not Modified
-            if response.status_code == 304:
-                logger.debug(f"Resource not modified: {url}")
+                
+                # Handle other HTTP errors
+                response.raise_for_status()
+                
+                # Parse response data
+                try:
+                    data = response.json() if response.content else None
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Failed to parse JSON response from {url}: {e}")
+                    data = None
+                
                 return APIResponse(
-                    data=None,
-                    etag=etag,
-                    not_modified=True,
+                    data=data,
+                    etag=response.headers.get("ETag"),
+                    not_modified=False,
                     rate_limit_remaining=remaining,
                     rate_limit_reset=reset_time,
                 )
+                
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 401:
+                    raise AuthenticationError("Invalid GitHub token or insufficient permissions")
+                elif e.response.status_code == 404:
+                    logger.debug(f"Resource not found: {url}")
+                    return APIResponse(data=None)
+                elif e.response.status_code == 422:
+                    raise APIError(f"Unprocessable entity: {e.response.text}", status_code=422)
+                else:
+                    raise APIError(f"HTTP {e.response.status_code}: {e.response.text}", status_code=e.response.status_code)
+            except httpx.ConnectTimeout as e:
+                if attempt < max_retries:
+                    backoff_time = 2 ** attempt
+                    logger.debug(f"Connection timeout, retrying in {backoff_time}s (attempt {attempt + 1})")
+                    await asyncio.sleep(backoff_time)
+                    continue
+                raise NetworkError(f"Connection timeout to GitHub API: {url}", cause=e)
+            except httpx.ReadTimeout as e:
+                if attempt < max_retries:
+                    backoff_time = 2 ** attempt
+                    logger.debug(f"Read timeout, retrying in {backoff_time}s (attempt {attempt + 1})")
+                    await asyncio.sleep(backoff_time)
+                    continue
+                raise NetworkError(f"Read timeout from GitHub API: {url}", cause=e)
+            except httpx.RequestError as e:
+                if attempt < max_retries:
+                    backoff_time = 2 ** attempt
+                    logger.debug(f"Network error, retrying in {backoff_time}s (attempt {attempt + 1}): {e}")
+                    await asyncio.sleep(backoff_time)
+                    continue
+                raise NetworkError(f"Network error accessing GitHub API: {url}", cause=e)
+            except (AuthenticationError, APIError):
+                # These should not be retried
+                raise
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e):
+                    logger.warning(f"Event loop closed during request to {url}, request cancelled")
+                    # Return empty response for closed event loop
+                    return APIResponse(data=None)
+                else:
+                    log_exception(logger, f"Runtime error making request to {url}", e)
+                    raise wrap_exception(e, f"Runtime error making request to {url}")
+            except Exception as e:
+                if attempt < max_retries:
+                    backoff_time = 2 ** attempt
+                    logger.debug(f"Unexpected error, retrying in {backoff_time}s (attempt {attempt + 1}): {e}")
+                    await asyncio.sleep(backoff_time)
+                    continue
+                log_exception(logger, f"Unexpected error making request to {url}", e)
+                raise wrap_exception(e, f"Unexpected error making request to {url}")
+        
+        # This should never be reached, but just in case
+        raise APIError(f"Max retries exceeded for request to {url}")
+    
+    async def _handle_rate_limit_gracefully(self, reset_time: datetime) -> None:
+        """Handle rate limit gracefully by waiting until reset time."""
+        now = datetime.now()
+        wait_time = (reset_time - now).total_seconds()
+        
+        if wait_time > 0:
+            if self.rate_limit_manager.should_show_message():
+                message = self.error_formatter.format_rate_limit_message(reset_time)
+                log_user_message(logger, message)
             
-            # Handle other HTTP errors
-            response.raise_for_status()
-            
-            # Parse response data
-            try:
-                data = response.json() if response.content else None
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse JSON response from {url}: {e}")
-                data = None
-            
-            return APIResponse(
-                data=data,
-                etag=response.headers.get("ETag"),
-                not_modified=False,
-                rate_limit_remaining=remaining,
-                rate_limit_reset=reset_time,
-            )
-            
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                raise AuthenticationError("Invalid GitHub token or insufficient permissions")
-            elif e.response.status_code == 404:
-                logger.debug(f"Resource not found: {url}")
-                return APIResponse(data=None)
-            elif e.response.status_code == 422:
-                raise APIError(f"Unprocessable entity: {e.response.text}", status_code=422)
-            else:
-                raise APIError(f"HTTP {e.response.status_code}: {e.response.text}", status_code=e.response.status_code)
-        except httpx.ConnectTimeout as e:
-            raise NetworkError(f"Connection timeout to GitHub API: {url}", cause=e)
-        except httpx.ReadTimeout as e:
-            raise NetworkError(f"Read timeout from GitHub API: {url}", cause=e)
-        except httpx.RequestError as e:
-            raise NetworkError(f"Network error accessing GitHub API: {url}", cause=e)
-        except (RateLimitError, AuthenticationError, APIError, NetworkError):
-            # These are expected exceptions that should be re-raised as-is
-            raise
-        except RuntimeError as e:
-            if "Event loop is closed" in str(e):
-                logger.warning(f"Event loop closed during request to {url}, request cancelled")
-                # Return empty response for closed event loop
-                return APIResponse(data=None)
-            else:
-                log_exception(logger, f"Runtime error making request to {url}", e)
-                raise wrap_exception(e, f"Runtime error making request to {url}")
-        except Exception as e:
-            log_exception(logger, f"Unexpected error making request to {url}", e)
-            raise wrap_exception(e, f"Unexpected error making request to {url}")
+            log_rate_limit_debug(logger, f"Waiting {wait_time:.1f} seconds for rate limit reset")
+            await asyncio.sleep(wait_time)
+    
+    def _extract_repo_name_from_url(self, url: str) -> Optional[str]:
+        """Extract repository name from GitHub API URL."""
+        try:
+            # Handle URLs like /repos/owner/repo/... or repos/owner/repo/...
+            if '/repos/' in url:
+                parts = url.split('/repos/')[1].split('/')
+                if len(parts) >= 2:
+                    return f"{parts[0]}/{parts[1]}"
+            elif url.startswith('repos/'):
+                # Handle URLs without leading slash
+                parts = url.split('/')[1:]  # Skip 'repos'
+                if len(parts) >= 2:
+                    return f"{parts[0]}/{parts[1]}"
+            return None
+        except (IndexError, AttributeError):
+            return None
     
     async def get_file_content_async(
         self, repo: Repository, path: str, etag: Optional[str] = None
@@ -235,6 +369,10 @@ class AsyncGitHubClient:
         Returns:
             APIResponse containing FileContent object
         """
+        # Ensure proper event loop context
+        if not self.event_loop_context.is_event_loop_running():
+            logger.debug("No event loop running, ensuring proper context for get_file_content_async")
+            
         try:
             url = f"/repos/{quote(repo.full_name)}/contents/{quote(path, safe='/')}"
             response = await self._make_request("GET", url, etag=etag)
@@ -292,10 +430,31 @@ class AsyncGitHubClient:
                 rate_limit_reset=response.rate_limit_reset,
             )
             
+        except RateLimitError as e:
+            # Handle rate limits gracefully - suppress stack traces for user
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Rate limit encountered for {repo.full_name}/{path}: {self.error_formatter.format_technical_details(e)}")
+                # Re-raise to be handled by the retry logic in _make_request
+                raise
+            else:
+                raise
         except (RepositoryNotFoundError, NetworkError, AuthenticationError):
             raise
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e).lower():
+                logger.debug(f"Event loop error in get_file_content_async for {repo.full_name}/{path}: {e}")
+                # Return empty response for event loop errors
+                return APIResponse(data=None)
+            else:
+                raise
         except Exception as e:
-            log_exception(logger, f"Failed to get file content for {repo.full_name}/{path}", e)
+            # Use enhanced error logging with user message separation
+            if self.error_formatter.should_suppress_error(e):
+                user_message = f"Unable to access file {path} in {repo.full_name}"
+                technical_message = f"Failed to get file content for {repo.full_name}/{path}"
+                log_exception_with_user_message(logger, user_message, technical_message, e)
+            else:
+                log_exception(logger, f"Failed to get file content for {repo.full_name}/{path}", e)
             raise wrap_exception(e, f"Failed to get file content for {repo.full_name}/{path}")
     
     async def get_blob_content_async(self, repo: Repository, sha: str) -> Optional[str]:
@@ -353,11 +512,29 @@ class AsyncGitHubClient:
                 # Assume it's already text
                 return content
                 
-        except (RateLimitError, NetworkError, AuthenticationError):
+        except RateLimitError as e:
+            # Handle rate limits gracefully - suppress stack traces for user
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Rate limit encountered for blob {sha}: {self.error_formatter.format_technical_details(e)}")
+                # Re-raise to be handled by the retry logic in _make_request
+                raise
+            else:
+                raise
+        except (NetworkError, AuthenticationError):
             # Re-raise these exceptions for proper handling upstream
             raise
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e).lower():
+                logger.debug(f"Event loop error in get_blob_content_async for SHA {sha}: {e}")
+                return None
+            else:
+                raise
         except Exception as e:
-            logger.warning(f"Failed to get blob content for SHA {sha}: {e}")
+            # Check if this should be suppressed from user display
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Suppressed error for blob {sha}: {self.error_formatter.format_technical_details(e)}")
+            else:
+                logger.warning(f"Failed to get blob content for SHA {sha}: {e}")
             return None
     
     async def get_tree_async(self, repo: Repository, etag: Optional[str] = None) -> APIResponse:
@@ -370,33 +547,62 @@ class AsyncGitHubClient:
         Returns:
             APIResponse containing list of FileInfo objects
         """
-        url = f"/repos/{quote(repo.full_name)}/git/trees/{repo.default_branch}"
-        params = {"recursive": "1"}
-        
-        response = await self._make_request("GET", url, etag=etag, params=params)
-        
-        if response.not_modified or not response.data:
-            return response
+        # Ensure proper event loop context
+        if not self.event_loop_context.is_event_loop_running():
+            logger.debug("No event loop running, ensuring proper context for get_tree_async")
             
-        tree_data = response.data
-        files = []
-        
-        for item in tree_data.get("tree", []):
-            if item["type"] == "blob":  # Only include files, not directories
-                file_info = FileInfo(
-                    path=item["path"],
-                    sha=item["sha"],
-                    size=item.get("size", 0),
-                )
-                files.append(file_info)
-        
-        return APIResponse(
-            data=files,
-            etag=response.etag,
-            not_modified=False,
-            rate_limit_remaining=response.rate_limit_remaining,
-            rate_limit_reset=response.rate_limit_reset,
-        )
+        try:
+            url = f"/repos/{quote(repo.full_name)}/git/trees/{repo.default_branch}"
+            params = {"recursive": "1"}
+            
+            response = await self._make_request("GET", url, etag=etag, params=params)
+            
+            if response.not_modified or not response.data:
+                return response
+                
+            tree_data = response.data
+            files = []
+            
+            for item in tree_data.get("tree", []):
+                if item["type"] == "blob":  # Only include files, not directories
+                    file_info = FileInfo(
+                        path=item["path"],
+                        sha=item["sha"],
+                        size=item.get("size", 0),
+                    )
+                    files.append(file_info)
+            
+            return APIResponse(
+                data=files,
+                etag=response.etag,
+                not_modified=False,
+                rate_limit_remaining=response.rate_limit_remaining,
+                rate_limit_reset=response.rate_limit_reset,
+            )
+            
+        except RateLimitError as e:
+            # Handle rate limits gracefully - suppress stack traces for user
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Rate limit encountered for {repo.full_name} tree: {self.error_formatter.format_technical_details(e)}")
+                # Re-raise to be handled by the retry logic in _make_request
+                raise
+            else:
+                raise
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e).lower():
+                logger.debug(f"Event loop error in get_tree_async for {repo.full_name}: {e}")
+                # Return empty response for event loop errors
+                return APIResponse(data=None)
+            else:
+                raise
+        except Exception as e:
+            # Check if this should be suppressed from user display
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Suppressed error for {repo.full_name} tree: {self.error_formatter.format_technical_details(e)}")
+                raise
+            else:
+                logger.warning(f"Failed to get tree for {repo.full_name}: {e}")
+                raise
     
     async def get_multiple_file_contents_parallel(
         self,
@@ -517,45 +723,52 @@ class AsyncGitHubClient:
             Tuple of (file_path, FileContent) or None if failed
         """
         async with semaphore:
-            for attempt in range(self.config.retry_attempts + 1):
-                try:
-                    blob_content = await self.get_blob_content_async(repo, file_info.sha)
-                    if blob_content:
-                        file_content = FileContent(
-                            content=blob_content,
-                            sha=file_info.sha,
-                            size=file_info.size
-                        )
-                        return (file_path, file_content)
-                    else:
-                        logger.debug(f"No blob content returned for {repo.full_name}/{file_path}")
-                        return None
-                        
-                except RateLimitError as e:
-                    if attempt < self.config.retry_attempts:
-                        delay = self.config.retry_delay_base * (2 ** attempt)
-                        logger.debug(f"Rate limited fetching {file_path}, retrying in {delay}s (attempt {attempt + 1})")
-                        await asyncio.sleep(delay)
-                        continue
-                    else:
-                        logger.warning(f"Rate limit exceeded for {repo.full_name}/{file_path} after {attempt + 1} attempts")
-                        raise
-                        
-                except (NetworkError, AuthenticationError) as e:
-                    if attempt < self.config.retry_attempts:
-                        delay = self.config.retry_delay_base * (2 ** attempt)
-                        logger.debug(f"Network/auth error fetching {file_path}, retrying in {delay}s (attempt {attempt + 1}): {e}")
-                        await asyncio.sleep(delay)
-                        continue
-                    else:
-                        logger.warning(f"Network/auth error for {repo.full_name}/{file_path} after {attempt + 1} attempts: {e}")
-                        raise
-                        
-                except Exception as e:
-                    logger.warning(f"Failed to get blob content for {repo.full_name}/{file_path}: {e}")
+            try:
+                blob_content = await self.get_blob_content_async(repo, file_info.sha)
+                if blob_content:
+                    file_content = FileContent(
+                        content=blob_content,
+                        sha=file_info.sha,
+                        size=file_info.size
+                    )
+                    return (file_path, file_content)
+                else:
+                    logger.debug(f"No blob content returned for {repo.full_name}/{file_path}")
                     return None
-            
-            return None
+                        
+            except RateLimitError as e:
+                # Rate limits are now handled gracefully in _make_request_with_retry
+                # Log and re-raise for proper handling upstream
+                if self.error_formatter.should_suppress_error(e):
+                    logger.debug(f"Rate limit handled gracefully for {repo.full_name}/{file_path}")
+                else:
+                    logger.debug(f"Rate limit error for {repo.full_name}/{file_path}: {e}")
+                raise
+            except RuntimeError as e:
+                if "Event loop is closed" in str(e) or "no running event loop" in str(e).lower():
+                    logger.debug(f"Event loop error in _fetch_blob_with_semaphore for {repo.full_name}/{file_path}: {e}")
+                    return None
+                else:
+                    raise
+            except Exception as e:
+                if self.error_formatter.should_suppress_error(e):
+                    logger.debug(f"Suppressed error in _fetch_blob_with_semaphore for {repo.full_name}/{file_path}: {self.error_formatter.format_technical_details(e)}")
+                else:
+                    logger.warning(f"Failed to fetch blob for {repo.full_name}/{file_path}: {e}")
+                return Noneg(f"Rate limit for {repo.full_name}/{file_path}: {self.error_formatter.format_technical_details(e)}")
+                raise
+                        
+            except (NetworkError, AuthenticationError) as e:
+                if not self.error_formatter.should_suppress_error(e):
+                    logger.warning(f"Network/auth error for {repo.full_name}/{file_path}: {e}")
+                raise
+                        
+            except Exception as e:
+                if self.error_formatter.should_suppress_error(e):
+                    logger.debug(f"Suppressed error for {repo.full_name}/{file_path}: {self.error_formatter.format_technical_details(e)}")
+                else:
+                    logger.warning(f"Failed to get blob content for {repo.full_name}/{file_path}: {e}")
+                return None
     
     async def process_batch_requests(
         self,
@@ -610,64 +823,55 @@ class AsyncGitHubClient:
         request: BatchRequest,
         context: AsyncBatchContext
     ) -> BatchResult:
-        """Process a single request with semaphore control and retry logic."""
+        """Process a single request with semaphore control and graceful error handling."""
         start_time = time.time()
         
         async with context.semaphore:
-            for attempt in range(self.config.retry_attempts + 1):
-                try:
-                    # Get file content
-                    response = await self.get_file_content_async(request.repo, request.file_path)
-                    
-                    processing_time = time.time() - start_time
-                    
-                    if response.data:
-                        return BatchResult(
-                            request=request,
-                            content=response.data,
-                            processing_time=processing_time
-                        )
-                    else:
-                        return BatchResult(
-                            request=request,
-                            error=APIError(f"No content returned for {request.file_path}"),
-                            processing_time=processing_time
-                        )
+            try:
+                # Get file content - rate limiting is now handled gracefully in _make_request_with_retry
+                response = await self.get_file_content_async(request.repo, request.file_path)
                 
-                except RateLimitError as e:
-                    # Handle rate limiting with exponential backoff
-                    if attempt < self.config.retry_attempts:
-                        delay = self.config.retry_delay_base * (2 ** attempt)
-                        logger.debug(f"Rate limited, retrying in {delay}s (attempt {attempt + 1})")
-                        await asyncio.sleep(delay)
-                        continue
-                    else:
-                        return BatchResult(
-                            request=request,
-                            error=e,
-                            processing_time=time.time() - start_time
-                        )
+                processing_time = time.time() - start_time
                 
-                except Exception as e:
-                    # Handle other errors
-                    if attempt < self.config.retry_attempts:
-                        delay = self.config.retry_delay_base * (2 ** attempt)
-                        logger.debug(f"Request failed, retrying in {delay}s (attempt {attempt + 1}): {e}")
-                        await asyncio.sleep(delay)
-                        continue
-                    else:
-                        return BatchResult(
-                            request=request,
-                            error=e,
-                            processing_time=time.time() - start_time
-                        )
-        
-        # This should never be reached, but just in case
-        return BatchResult(
-            request=request,
-            error=APIError("Unexpected error in request processing"),
-            processing_time=time.time() - start_time
-        )
+                if response.data:
+                    return BatchResult(
+                        request=request,
+                        content=response.data,
+                        processing_time=processing_time
+                    )
+                else:
+                    return BatchResult(
+                        request=request,
+                        error=APIError(f"No content returned for {request.file_path}"),
+                        processing_time=processing_time
+                    )
+            
+            except RateLimitError as e:
+                # Rate limits are now handled gracefully in _make_request_with_retry
+                # This should rarely be reached, but handle it gracefully
+                if self.error_formatter.should_suppress_error(e):
+                    logger.debug(f"Rate limit handled gracefully for batch request {request.file_path}")
+                
+                return BatchResult(
+                    request=request,
+                    error=e,
+                    processing_time=time.time() - start_time
+                )
+            
+            except Exception as e:
+                # Handle other errors gracefully
+                processing_time = time.time() - start_time
+                
+                if self.error_formatter.should_suppress_error(e):
+                    logger.debug(f"Suppressed error for batch request {request.file_path}: {self.error_formatter.format_technical_details(e)}")
+                else:
+                    logger.debug(f"Request failed for {request.file_path}: {e}")
+                
+                return BatchResult(
+                    request=request,
+                    error=e,
+                    processing_time=processing_time
+                )
     
     async def stream_large_file_content(
         self,
@@ -693,6 +897,10 @@ class AsyncGitHubClient:
             NetworkError: If network operations fail
             AuthenticationError: If authentication fails
         """
+        # Ensure proper event loop context
+        if not self.event_loop_context.is_event_loop_running():
+            logger.debug("No event loop running, ensuring proper context for stream_large_file_content")
+            
         try:
             url = f"/repos/{quote(repo.full_name)}/contents/{quote(file_path, safe='/')}"
             
@@ -732,11 +940,30 @@ class AsyncGitHubClient:
             async for chunk in self._stream_blob_content(repo, sha, chunk_size):
                 yield chunk
                 
+        except RateLimitError as e:
+            # Handle rate limits gracefully - suppress stack traces for user
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Rate limit encountered for {repo.full_name}/{file_path}: {self.error_formatter.format_technical_details(e)}")
+                # Re-raise to be handled by the retry logic in _make_request
+                raise
+            else:
+                raise
         except (RepositoryNotFoundError, NetworkError, AuthenticationError):
             raise
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e).lower():
+                logger.debug(f"Event loop error in stream_large_file_content for {repo.full_name}/{file_path}: {e}")
+                return
+            else:
+                raise
         except Exception as e:
-            logger.error(f"Failed to stream file content for {repo.full_name}/{file_path}: {e}")
-            raise wrap_exception(e, f"Failed to stream file content for {repo.full_name}/{file_path}")
+            # Check if this should be suppressed from user display
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Suppressed error for {repo.full_name}/{file_path}: {self.error_formatter.format_technical_details(e)}")
+                raise wrap_exception(e, f"Failed to stream file content for {repo.full_name}/{file_path}")
+            else:
+                logger.error(f"Failed to stream file content for {repo.full_name}/{file_path}: {e}")
+                raise wrap_exception(e, f"Failed to stream file content for {repo.full_name}/{file_path}")
     
     async def _stream_blob_content(
         self,
@@ -837,11 +1064,30 @@ class AsyncGitHubClient:
                     for i in range(0, len(content_b64), chunk_size):
                         yield content_b64[i:i + chunk_size]
                         
-        except (RateLimitError, NetworkError, AuthenticationError):
+        except RateLimitError as e:
+            # Handle rate limits gracefully - suppress stack traces for user
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Rate limit encountered for blob {sha}: {self.error_formatter.format_technical_details(e)}")
+                # Re-raise to be handled by the retry logic in _make_request
+                raise
+            else:
+                raise
+        except (NetworkError, AuthenticationError):
             raise
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e).lower():
+                logger.debug(f"Event loop error in _stream_blob_content for SHA {sha}: {e}")
+                return
+            else:
+                raise
         except Exception as e:
-            logger.error(f"Failed to stream blob content for SHA {sha}: {e}")
-            raise wrap_exception(e, f"Failed to stream blob content for SHA {sha}")
+            # Check if this should be suppressed from user display
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Suppressed error for blob {sha}: {self.error_formatter.format_technical_details(e)}")
+                raise wrap_exception(e, f"Failed to stream blob content for SHA {sha}")
+            else:
+                logger.error(f"Failed to stream blob content for SHA {sha}: {e}")
+                raise wrap_exception(e, f"Failed to stream blob content for SHA {sha}")
     
     async def get_file_content_chunked(
         self,
@@ -866,6 +1112,10 @@ class AsyncGitHubClient:
             RepositoryNotFoundError: If the repository doesn't exist
             NetworkError: If network operations fail
         """
+        # Ensure proper event loop context
+        if not self.event_loop_context.is_event_loop_running():
+            logger.debug("No event loop running, ensuring proper context for get_file_content_chunked")
+            
         max_size = max_size or self.config.max_memory_usage_mb * 1024 * 1024  # Convert MB to bytes
         
         try:
@@ -916,11 +1166,30 @@ class AsyncGitHubClient:
                 size=file_size
             )
             
+        except RateLimitError as e:
+            # Handle rate limits gracefully - suppress stack traces for user
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Rate limit encountered for {repo.full_name}/{file_path}: {self.error_formatter.format_technical_details(e)}")
+                # Re-raise to be handled by the retry logic in _make_request
+                raise
+            else:
+                raise
         except (RepositoryNotFoundError, NetworkError, AuthenticationError):
             raise
+        except RuntimeError as e:
+            if "Event loop is closed" in str(e) or "no running event loop" in str(e).lower():
+                logger.debug(f"Event loop error in get_file_content_chunked for {repo.full_name}/{file_path}: {e}")
+                return None
+            else:
+                raise
         except Exception as e:
-            logger.error(f"Failed to get chunked file content for {repo.full_name}/{file_path}: {e}")
-            raise wrap_exception(e, f"Failed to get chunked file content for {repo.full_name}/{file_path}")
+            # Check if this should be suppressed from user display
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Suppressed error for {repo.full_name}/{file_path}: {self.error_formatter.format_technical_details(e)}")
+                raise wrap_exception(e, f"Failed to get chunked file content for {repo.full_name}/{file_path}")
+            else:
+                logger.error(f"Failed to get chunked file content for {repo.full_name}/{file_path}: {e}")
+                raise wrap_exception(e, f"Failed to get chunked file content for {repo.full_name}/{file_path}")
     
     async def get_cross_repo_file_contents(
         self,
@@ -1116,8 +1385,6 @@ class AsyncGitHubClient:
         Returns:
             List of batch results
         """
-        from .batch_models import BatchResult
-        
         async with semaphore:
             try:
                 # Use the existing batch processing method
@@ -1232,6 +1499,39 @@ class AsyncGitHubClient:
         
         # Return groups as a list
         return list(size_groups.values())
+    
+    def allocate_repository_budgets(self, repositories: List[str]) -> None:
+        """
+        Allocate rate limit budget across repositories for intelligent throttling.
+        
+        Args:
+            repositories: List of repository names to allocate budget for
+        """
+        self.intelligent_limiter.allocate_repository_budgets(repositories)
+        logger.debug(f"Allocated rate limit budgets for {len(repositories)} repositories")
+    
+    def set_rate_limit_strategy(self, strategy: RateLimitStrategy) -> None:
+        """
+        Set the rate limiting strategy for this client.
+        
+        Args:
+            strategy: Rate limiting strategy to use
+        """
+        self.intelligent_limiter = IntelligentRateLimiter(strategy)
+        logger.info(f"Rate limiting strategy set to: {strategy.value}")
+    
+    def get_rate_limit_budget_status(self) -> Dict[str, any]:
+        """
+        Get current rate limit budget status for monitoring.
+        
+        Returns:
+            Dictionary with budget status information
+        """
+        return self.intelligent_limiter.get_budget_status()
+    
+    def redistribute_unused_budget(self) -> None:
+        """Redistribute unused budget from low-activity repositories."""
+        self.intelligent_limiter.redistribute_unused_budget()
     
     async def close(self) -> None:
         """Close the async HTTP client."""

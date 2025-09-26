@@ -528,7 +528,7 @@ class GitHubClient:
                         rate_limit_reset=response.rate_limit_reset,
                     )
                 else:
-                    logger.warning(f"⚠️  No repositories found for {org} after retry")
+                    logger.info(f"No repositories found for {org} after retry")
                     return APIResponse(data=[])
                     
             except Exception as retry_e:

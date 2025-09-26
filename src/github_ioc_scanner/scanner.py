@@ -8,6 +8,7 @@ from .async_github_client import AsyncGitHubClient
 from .batch_coordinator import BatchCoordinator
 from .batch_models import BatchConfig, BatchStrategy
 from .cache import CacheManager
+from .event_loop_context import EventLoopContext
 from .exceptions import (
     AuthenticationError,
     NetworkError,
@@ -21,7 +22,10 @@ from .exceptions import (
 )
 from .github_client import GitHubClient
 from .ioc_loader import IOCLoader
-from .logging_config import get_logger, log_exception, log_performance
+from .logging_config import (
+    get_logger, log_exception, log_performance, log_user_message, 
+    log_rate_limit_debug, log_exception_with_user_message
+)
 from .models import ScanConfig, ScanResults, Repository, IOCMatch, CacheStats, FileContent, FileInfo, PackageDependency
 from .parsers.factory import get_parser, parse_file_safely
 # Import parsers module to ensure all parsers are registered
@@ -173,9 +177,11 @@ class GitHubIOCScanner:
 
     def _run_team_batch_processing(self, repositories, strategy, file_patterns):
         """Run batch processing for team repositories synchronously."""
+        from .event_loop_context import EventLoopContext
         import asyncio
         import concurrent.futures
-        import threading
+        
+        event_loop_context = EventLoopContext()
         
         async def run_batch():
             # Ensure we have a fresh batch coordinator for this event loop
@@ -184,65 +190,99 @@ class GitHubIOCScanner:
                 if self.batch_coordinator and self.batch_coordinator.github_client.client:
                     try:
                         await self.batch_coordinator.github_client.client.aclose()
-                    except:
-                        pass  # Ignore errors during cleanup
+                    except Exception as e:
+                        logger.debug(f"Error closing HTTP client during cleanup: {e}")
                     self.batch_coordinator.github_client.client = None
             
             return await self.batch_coordinator.process_repositories_batch(
                 repositories, strategy=strategy, file_patterns=file_patterns
             )
         
-        # Check if we're already in an event loop
         try:
-            loop = asyncio.get_running_loop()
-            # We're in an event loop, need to run in a separate thread with its own loop
-            def run_in_thread():
-                # Create a new event loop for this thread
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    # Create a fresh batch coordinator for this thread's event loop
-                    from .async_github_client import AsyncGitHubClient
-                    from .batch_coordinator import BatchCoordinator
+            # Check if we're already in an event loop
+            if event_loop_context.is_event_loop_running():
+                # We're in an event loop, need to run in a separate thread with its own loop
+                def run_in_thread():
+                    # Use EventLoopContext to manage the new event loop
+                    thread_event_context = EventLoopContext()
                     
-                    # Create new async client for this event loop
-                    fresh_async_client = AsyncGitHubClient(
-                        token=self.batch_coordinator.github_client.token,
-                        config=self.batch_coordinator.config
-                    )
-                    
-                    # Create new batch coordinator
-                    fresh_batch_coordinator = BatchCoordinator(
-                        github_client=fresh_async_client,
-                        cache_manager=self.cache_manager,
-                        config=self.batch_coordinator.config
-                    )
-                    fresh_batch_coordinator.scanner = self
-                    
-                    async def run_with_fresh_coordinator():
-                        await fresh_batch_coordinator.start()
-                        try:
-                            return await fresh_batch_coordinator.process_repositories_batch(
-                                repositories, strategy=strategy, file_patterns=file_patterns
+                    try:
+                        with thread_event_context.managed_event_loop() as loop:
+                            # Create a fresh batch coordinator for this thread's event loop
+                            from .async_github_client import AsyncGitHubClient
+                            from .batch_coordinator import BatchCoordinator
+                            
+                            # Create new async client for this event loop
+                            fresh_async_client = AsyncGitHubClient(
+                                token=self.batch_coordinator.github_client.token,
+                                config=self.batch_coordinator.config
                             )
-                        finally:
-                            await fresh_batch_coordinator.stop()
-                    
-                    return new_loop.run_until_complete(run_with_fresh_coordinator())
-                finally:
-                    new_loop.close()
-            
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_thread)
-                return future.result()
+                            
+                            # Create new batch coordinator
+                            fresh_batch_coordinator = BatchCoordinator(
+                                github_client=fresh_async_client,
+                                cache_manager=self.cache_manager,
+                                config=self.batch_coordinator.config
+                            )
+                            fresh_batch_coordinator.scanner = self
+                            
+                            async def run_with_fresh_coordinator():
+                                await fresh_batch_coordinator.start()
+                                try:
+                                    return await fresh_batch_coordinator.process_repositories_batch(
+                                        repositories, strategy=strategy, file_patterns=file_patterns
+                                    )
+                                finally:
+                                    await fresh_batch_coordinator.stop()
+                            
+                            return loop.run_until_complete(run_with_fresh_coordinator())
+                    except Exception as e:
+                        logger.error(f"Error in thread event loop: {e}")
+                        raise
                 
-        except RuntimeError:
-            # No event loop running, safe to use asyncio.run
-            return asyncio.run(run_batch())
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(run_in_thread)
+                    return future.result()
+                    
+            else:
+                # No event loop running, use EventLoopContext to run safely
+                with event_loop_context.managed_event_loop() as loop:
+                    return loop.run_until_complete(run_batch())
+                    
         except Exception as e:
             logger.warning(f"Event loop handling failed, falling back to sequential processing: {e}")
             # Fall back to sequential processing if async fails
             return {}
+
+    def _run_async_operation_safely(self, coro, operation_name: str = "async operation"):
+        """
+        Run an async operation safely with proper event loop context management.
+        
+        This method ensures proper async context during rate limit recovery and
+        prevents "no running event loop" errors.
+        
+        Args:
+            coro: The coroutine to run
+            operation_name: Name of the operation for logging
+            
+        Returns:
+            The result of the coroutine
+        """
+        event_loop_context = EventLoopContext()
+        
+        try:
+            if event_loop_context.is_event_loop_running():
+                # We're already in an async context, create a task
+                logger.debug(f"Running {operation_name} as task in existing event loop")
+                return asyncio.create_task(coro)
+            else:
+                # No running loop, use managed event loop
+                logger.debug(f"Running {operation_name} with managed event loop")
+                with event_loop_context.managed_event_loop() as loop:
+                    return loop.run_until_complete(coro)
+        except Exception as e:
+            logger.error(f"Error running {operation_name} safely: {e}")
+            raise
 
     def _get_scan_patterns(self) -> List[str]:
         """Get file patterns to scan based on configuration."""
@@ -305,55 +345,62 @@ class GitHubIOCScanner:
     
     def _run_async_scan_safely(self) -> ScanResults:
         """Run async scan with proper event loop handling."""
+        from .event_loop_context import EventLoopContext
         import asyncio
         import concurrent.futures
         
-        # Check if we're already in an event loop
+        event_loop_context = EventLoopContext()
+        
         try:
-            loop = asyncio.get_running_loop()
-            # We're in an event loop, need to run in a separate thread with its own loop
-            def run_in_thread():
-                # Create a new event loop for this thread
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    # Create fresh async components for this event loop
-                    from .async_github_client import AsyncGitHubClient
-                    from .batch_coordinator import BatchCoordinator
-                    
-                    # Create new async client for this event loop
-                    fresh_async_client = AsyncGitHubClient(
-                        token=self.batch_coordinator.github_client.token,
-                        config=self.batch_coordinator.config
-                    )
-                    
-                    # Create new batch coordinator
-                    fresh_batch_coordinator = BatchCoordinator(
-                        github_client=fresh_async_client,
-                        cache_manager=self.cache_manager,
-                        config=self.batch_coordinator.config
-                    )
-                    fresh_batch_coordinator.scanner = self
-                    
-                    # Temporarily replace the batch coordinator
-                    original_coordinator = self.batch_coordinator
-                    self.batch_coordinator = fresh_batch_coordinator
+            # Check if we're already in an event loop
+            if event_loop_context.is_event_loop_running():
+                # We're in an event loop, need to run in a separate thread with its own loop
+                def run_in_thread():
+                    # Use EventLoopContext to manage the new event loop
+                    thread_event_context = EventLoopContext()
                     
                     try:
-                        return new_loop.run_until_complete(self._scan_with_batch_processing())
-                    finally:
-                        # Restore original coordinator
-                        self.batch_coordinator = original_coordinator
-                finally:
-                    new_loop.close()
-            
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_thread)
-                return future.result()
+                        with thread_event_context.managed_event_loop() as loop:
+                            # Create fresh async components for this event loop
+                            from .async_github_client import AsyncGitHubClient
+                            from .batch_coordinator import BatchCoordinator
+                            
+                            # Create new async client for this event loop
+                            fresh_async_client = AsyncGitHubClient(
+                                token=self.batch_coordinator.github_client.token,
+                                config=self.batch_coordinator.config
+                            )
+                            
+                            # Create new batch coordinator
+                            fresh_batch_coordinator = BatchCoordinator(
+                                github_client=fresh_async_client,
+                                cache_manager=self.cache_manager,
+                                config=self.batch_coordinator.config
+                            )
+                            fresh_batch_coordinator.scanner = self
+                            
+                            # Temporarily replace the batch coordinator
+                            original_coordinator = self.batch_coordinator
+                            self.batch_coordinator = fresh_batch_coordinator
+                            
+                            try:
+                                return loop.run_until_complete(self._scan_with_batch_processing())
+                            finally:
+                                # Restore original coordinator
+                                self.batch_coordinator = original_coordinator
+                    except Exception as e:
+                        logger.error(f"Error in thread event loop: {e}")
+                        raise
                 
-        except RuntimeError:
-            # No event loop running, safe to use asyncio.run
-            return asyncio.run(self._scan_with_batch_processing())
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(run_in_thread)
+                    return future.result()
+                    
+            else:
+                # No event loop running, use EventLoopContext to run safely
+                with event_loop_context.managed_event_loop() as loop:
+                    return loop.run_until_complete(self._scan_with_batch_processing())
+                    
         except Exception as e:
             logger.warning(f"Async scan failed, falling back to sequential processing: {e}")
             # Fall back to sequential processing if async fails
@@ -396,7 +443,7 @@ class GitHubIOCScanner:
                     if len(repositories) > 5:
                         logger.info(f"📊 Total repositories: {len(repositories)} (showing first 5)")
                 else:
-                    logger.warning("⚠️  No repositories found during discovery")
+                    logger.info("No repositories found during discovery")
                 
                 if not repositories:
                     logger.warning("🚫 No repositories to scan, returning empty results")
@@ -407,13 +454,27 @@ class GitHubIOCScanner:
                         files_scanned=0
                     )
                 
-                # Execute batch scanning workflow with progress monitoring
-                file_patterns = self._get_scan_patterns()
-                batch_results = await self.batch_coordinator.process_repositories_batch(
-                    repositories, 
-                    strategy=self._select_batch_strategy(repositories),
-                    file_patterns=file_patterns
-                )
+                # Start budget redistribution task if intelligent rate limiting is enabled
+                redistribution_task = None
+                if self.async_github_client and hasattr(self.config, 'enable_intelligent_rate_limiting') and self.config.enable_intelligent_rate_limiting:
+                    redistribution_task = asyncio.create_task(self._periodic_budget_redistribution())
+                
+                try:
+                    # Execute batch scanning workflow with progress monitoring
+                    file_patterns = self._get_scan_patterns()
+                    batch_results = await self.batch_coordinator.process_repositories_batch(
+                        repositories, 
+                        strategy=self._select_batch_strategy(repositories),
+                        file_patterns=file_patterns
+                    )
+                finally:
+                    # Cancel budget redistribution task
+                    if redistribution_task:
+                        redistribution_task.cancel()
+                        try:
+                            await redistribution_task
+                        except asyncio.CancelledError:
+                            pass
                 
                 # Convert batch results to IOC matches
                 all_matches = []
@@ -983,7 +1044,7 @@ class GitHubIOCScanner:
             self.cache_manager.store_repository_metadata(org, repositories, response.etag)
             logger.info(f"Discovered {len(repositories)} repositories for {org}")
         else:
-            logger.warning(f"No repositories found for organization {org}")
+            logger.info(f"No repositories found for organization {org}")
             return []
         
         # Filter archived repositories if not included
@@ -1007,10 +1068,14 @@ class GitHubIOCScanner:
             return self.discover_organization_repositories(org)
         
         try:
-            # Use batch coordinator's organization discovery
+            # Use batch coordinator's organization discovery with proper async context
             repositories = await self.batch_coordinator._discover_organization_repositories(
                 org, repository_filter=None, max_repositories=None
             )
+        except Exception as e:
+            logger.warning(f"Batch organization discovery failed, falling back to sequential: {e}")
+            # Fall back to sequential discovery if batch fails
+            return self.discover_organization_repositories(org)
             
             # Filter archived repositories if not included
             if not self.config.include_archived:
@@ -1055,7 +1120,7 @@ class GitHubIOCScanner:
             self.cache_manager.store_repository_metadata(org, repositories, response.etag, team)
             logger.info(f"Discovered {len(repositories)} repositories for team {org}/{team}")
         else:
-            logger.warning(f"No repositories found for team {org}/{team}")
+            logger.info(f"No repositories found for team {org}/{team}")
             return []
         
         # Filter archived repositories if not included (same as organization discovery)
@@ -1517,7 +1582,34 @@ class GitHubIOCScanner:
             raise ConfigurationError("Must specify at least --org parameter")
         
         logger.info(f"🎯 Final repository count: {len(repositories)}")
+        
+        # Allocate rate limit budgets for intelligent throttling
+        if self.async_github_client and repositories:
+            repo_names = [repo.full_name for repo in repositories]
+            self.async_github_client.allocate_repository_budgets(repo_names)
+            logger.info(f"💰 Allocated rate limit budgets for {len(repo_names)} repositories")
+        
         return repositories
+    
+    async def _periodic_budget_redistribution(self) -> None:
+        """Periodically redistribute unused rate limit budget between repositories."""
+        try:
+            redistribution_interval = 300  # 5 minutes default
+            if hasattr(self.config, 'budget_redistribution_interval'):
+                redistribution_interval = self.config.budget_redistribution_interval
+            
+            while True:
+                await asyncio.sleep(redistribution_interval)
+                
+                if self.async_github_client:
+                    self.async_github_client.redistribute_unused_budget()
+                    logger.debug("Redistributed unused rate limit budget")
+                    
+        except asyncio.CancelledError:
+            logger.debug("Budget redistribution task cancelled")
+            raise
+        except Exception as e:
+            logger.warning(f"Error in budget redistribution: {e}")
     
     async def _scan_single_repository_batch(self, repo: Repository, ioc_hash: str) -> List[IOCMatch]:
         """Scan a single repository using batch processing for files."""
@@ -1529,10 +1621,15 @@ class GitHubIOCScanner:
                 logger.debug(f"No relevant files found in {repo.full_name}")
                 return []
             
-            # Use batch coordinator to process files
-            batch_results = await self.batch_coordinator.process_files_batch(
-                repo, file_paths, priority_files=self._get_priority_files(file_paths)
-            )
+            # Use batch coordinator to process files with proper async context
+            try:
+                batch_results = await self.batch_coordinator.process_files_batch(
+                    repo, file_paths, priority_files=self._get_priority_files(file_paths)
+                )
+            except Exception as e:
+                logger.error(f"Error during batch file processing for {repo.full_name}: {e}")
+                # Fall back to sequential processing if batch fails
+                return self.scan_repository_for_iocs(repo, ioc_hash)[0]
             
             # Process batch results to find IOC matches
             all_matches = []
@@ -1644,7 +1741,7 @@ class GitHubIOCScanner:
                 repositories = await self._discover_repositories_batch()
                 
                 if not repositories:
-                    logger.warning("No repositories found for batch scanning")
+                    logger.info("No repositories found for batch scanning")
                     return ScanResults(
                         matches=[],
                         cache_stats=self.cache_manager.get_cache_stats(),

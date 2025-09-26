@@ -72,7 +72,7 @@ class StreamingBatchProcessor:
         
         # Use streaming if memory pressure is detected
         if self.memory_monitor and self.memory_monitor.should_reduce_batch_size():
-            logger.info("Using streaming due to memory pressure")
+            logger.debug("Using streaming due to memory pressure")
             return True
         
         # Estimate memory usage based on request sizes
@@ -81,7 +81,7 @@ class StreamingBatchProcessor:
         ) / (1024 * 1024)
         
         if estimated_memory_mb > self.config.max_memory_per_chunk_mb * 2:
-            logger.info(f"Using streaming due to estimated memory usage: {estimated_memory_mb:.1f} MB")
+            logger.debug(f"Using streaming due to estimated memory usage: {estimated_memory_mb:.1f} MB")
             return True
         
         return False

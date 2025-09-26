@@ -306,7 +306,7 @@ class ResourceManager:
             'memory_after': memory_after
         }
         
-        logger.info(f"Memory cleanup completed: freed {memory_freed:.2f} MB in {cleanup_duration:.2f}s")
+        logger.debug(f"Memory cleanup completed: freed {memory_freed:.2f} MB in {cleanup_duration:.2f}s")
         return cleanup_stats
     
     def should_perform_cleanup(self) -> bool:

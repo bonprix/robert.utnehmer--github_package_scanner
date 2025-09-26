@@ -2,62 +2,173 @@
 
 import logging
 import sys
-from typing import Optional
+from typing import Optional, Dict, Any
+import os
+
+
+# Custom log levels for user messages
+USER_MESSAGE_LEVEL = 25  # Between INFO (20) and WARNING (30)
+RATE_LIMIT_DEBUG_LEVEL = 15  # Between DEBUG (10) and INFO (20)
+
+# Add custom log levels
+logging.addLevelName(USER_MESSAGE_LEVEL, "USER")
+logging.addLevelName(RATE_LIMIT_DEBUG_LEVEL, "RATE_LIMIT_DEBUG")
+
+
+class UserMessageFilter(logging.Filter):
+    """Filter to separate user messages from technical logs."""
+    
+    def __init__(self, show_user_messages: bool = True):
+        super().__init__()
+        self.show_user_messages = show_user_messages
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Allow user messages if enabled
+        if record.levelno == USER_MESSAGE_LEVEL:
+            return self.show_user_messages
+        
+        # Allow all other messages
+        return True
+
+
+class TechnicalLogFilter(logging.Filter):
+    """Filter to show only technical logs (no user messages)."""
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Block user messages from technical logs
+        return record.levelno != USER_MESSAGE_LEVEL
+
+
+class RateLimitDebugFilter(logging.Filter):
+    """Filter for rate limit debug messages."""
+    
+    def __init__(self, debug_rate_limits: bool = False):
+        super().__init__()
+        self.debug_rate_limits = debug_rate_limits
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Show rate limit debug messages only if enabled
+        if record.levelno == RATE_LIMIT_DEBUG_LEVEL:
+            return self.debug_rate_limits
+        
+        # Allow all other messages
+        return True
+
+
+class ErrorSuppressionFilter(logging.Filter):
+    """Filter to suppress technical stack traces for known error types."""
+    
+    def __init__(self, suppress_stack_traces: bool = True):
+        super().__init__()
+        self.suppress_stack_traces = suppress_stack_traces
+    
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self.suppress_stack_traces:
+            return True
+            
+        # Check if this is a rate limit or network error that should be suppressed
+        if hasattr(record, 'exc_info') and record.exc_info:
+            exc_type, exc_value, exc_traceback = record.exc_info
+            if exc_value and self._should_suppress_error(exc_value):
+                # Remove stack trace info for suppressed errors
+                record.exc_info = None
+                record.exc_text = None
+                
+        return True
+    
+    def _should_suppress_error(self, exception: Exception) -> bool:
+        """Determine if an error should have its stack trace suppressed."""
+        from .error_message_formatter import ErrorMessageFormatter
+        return ErrorMessageFormatter.should_suppress_error(exception)
 
 
 def setup_logging(
     level: str = "INFO",
     format_string: Optional[str] = None,
     include_timestamp: bool = True,
-    log_file: Optional[str] = None
+    log_file: Optional[str] = None,
+    debug_rate_limits: bool = False,
+    suppress_stack_traces: bool = True,
+    separate_user_messages: bool = True
 ) -> None:
     """
-    Configure logging for the GitHub IOC Scanner.
+    Configure logging for the GitHub IOC Scanner with enhanced user message separation.
     
     Args:
         level: Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
         format_string: Custom format string for log messages
         include_timestamp: Whether to include timestamps in log messages
         log_file: Optional file path to write logs to (in addition to console)
+        debug_rate_limits: Enable detailed rate limit debugging
+        suppress_stack_traces: Suppress stack traces for known error types
+        separate_user_messages: Separate user messages from technical logs
     """
     # Convert string level to logging constant
     numeric_level = getattr(logging, level.upper(), logging.INFO)
     
-    # Default format string
+    # Check environment variables for configuration
+    debug_rate_limits = debug_rate_limits or os.getenv('GITHUB_IOC_SCANNER_DEBUG_RATE_LIMITS', '').lower() == 'true'
+    suppress_stack_traces = suppress_stack_traces and os.getenv('GITHUB_IOC_SCANNER_SUPPRESS_STACK_TRACES', 'true').lower() != 'false'
+    
+    # Clear any existing handlers
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Set root logger level
+    root_logger.setLevel(logging.DEBUG)  # Allow all messages, filter at handler level
+    
+    # Create formatters
     if format_string is None:
         if include_timestamp:
-            format_string = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            technical_format = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+            user_format = "%(message)s"  # Simple format for user messages
         else:
-            format_string = "%(name)s - %(levelname)s - %(message)s"
+            technical_format = "%(name)s - %(levelname)s - %(message)s"
+            user_format = "%(message)s"
+    else:
+        technical_format = format_string
+        user_format = "%(message)s"
     
-    # Configure root logger
-    logging.basicConfig(
-        level=numeric_level,
-        format=format_string,
-        datefmt="%Y-%m-%d %H:%M:%S",
-        handlers=[]  # We'll add handlers manually
-    )
+    technical_formatter = logging.Formatter(technical_format, datefmt="%Y-%m-%d %H:%M:%S")
+    user_formatter = logging.Formatter(user_format)
     
-    # Create console handler
-    console_handler = logging.StreamHandler(sys.stderr)
-    console_handler.setLevel(numeric_level)
-    console_formatter = logging.Formatter(format_string, datefmt="%Y-%m-%d %H:%M:%S")
-    console_handler.setFormatter(console_formatter)
+    # Create console handler for user messages
+    if separate_user_messages:
+        user_console_handler = logging.StreamHandler(sys.stdout)
+        user_console_handler.setLevel(USER_MESSAGE_LEVEL)
+        user_console_handler.setFormatter(user_formatter)
+        user_console_handler.addFilter(UserMessageFilter(show_user_messages=True))
+        root_logger.addHandler(user_console_handler)
     
-    # Get root logger and add console handler
-    root_logger = logging.getLogger()
-    root_logger.addHandler(console_handler)
+    # Create console handler for technical logs
+    tech_console_handler = logging.StreamHandler(sys.stderr)
+    tech_console_handler.setLevel(numeric_level)
+    tech_console_handler.setFormatter(technical_formatter)
+    
+    # Add filters
+    if separate_user_messages:
+        tech_console_handler.addFilter(TechnicalLogFilter())
+    
+    tech_console_handler.addFilter(RateLimitDebugFilter(debug_rate_limits=debug_rate_limits))
+    tech_console_handler.addFilter(ErrorSuppressionFilter(suppress_stack_traces=suppress_stack_traces))
+    
+    root_logger.addHandler(tech_console_handler)
     
     # Add file handler if specified
     if log_file:
         try:
             file_handler = logging.FileHandler(log_file)
-            file_handler.setLevel(numeric_level)
-            file_formatter = logging.Formatter(
-                "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S"
-            )
-            file_handler.setFormatter(file_formatter)
+            file_handler.setLevel(logging.DEBUG)  # File gets all messages
+            file_handler.setFormatter(technical_formatter)
+            
+            # File handler gets rate limit debug messages if enabled
+            file_handler.addFilter(RateLimitDebugFilter(debug_rate_limits=debug_rate_limits))
+            
+            # File handler can optionally suppress stack traces
+            if suppress_stack_traces:
+                file_handler.addFilter(ErrorSuppressionFilter(suppress_stack_traces=False))  # Keep full details in file
+            
             root_logger.addHandler(file_handler)
         except (OSError, PermissionError) as e:
             logging.warning(f"Could not create log file {log_file}: {e}")
@@ -65,6 +176,7 @@ def setup_logging(
     # Set specific logger levels for external libraries to reduce noise
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> logging.Logger:
@@ -98,16 +210,85 @@ def set_log_level(level: str) -> None:
         handler.setLevel(numeric_level)
 
 
-def log_exception(logger: logging.Logger, message: str, exc: Exception) -> None:
+def log_user_message(logger: logging.Logger, message: str) -> None:
     """
-    Log an exception with full traceback information.
+    Log a user-friendly message that will be displayed to the user.
+    
+    Args:
+        logger: Logger instance to use
+        message: User-friendly message to display
+    """
+    logger.log(USER_MESSAGE_LEVEL, message)
+
+
+def log_rate_limit_debug(logger: logging.Logger, message: str) -> None:
+    """
+    Log detailed rate limit debugging information.
+    
+    Args:
+        logger: Logger instance to use
+        message: Rate limit debug message
+    """
+    logger.log(RATE_LIMIT_DEBUG_LEVEL, message)
+
+
+def log_exception(logger: logging.Logger, message: str, exc: Exception, 
+                 suppress_stack_trace: bool = None) -> None:
+    """
+    Log an exception with optional stack trace suppression.
     
     Args:
         logger: Logger instance to use
         message: Descriptive message about the error context
         exc: Exception instance to log
+        suppress_stack_trace: Override stack trace suppression for this exception
     """
-    logger.error(f"{message}: {exc}", exc_info=True)
+    if suppress_stack_trace is None:
+        # Use the ErrorMessageFormatter to determine if we should suppress
+        from .error_message_formatter import ErrorMessageFormatter
+        suppress_stack_trace = ErrorMessageFormatter.should_suppress_error(exc)
+    
+    if suppress_stack_trace:
+        # Log without stack trace
+        logger.error(f"{message}: {exc}")
+        # Log technical details at debug level
+        technical_details = _format_technical_details(exc)
+        logger.debug(f"Technical details for '{message}': {technical_details}")
+    else:
+        # Log with full stack trace
+        logger.error(f"{message}: {exc}", exc_info=True)
+
+
+def log_exception_with_user_message(logger: logging.Logger, user_message: str, 
+                                   technical_message: str, exc: Exception) -> None:
+    """
+    Log an exception with both user-friendly and technical messages.
+    
+    Args:
+        logger: Logger instance to use
+        user_message: User-friendly message to display
+        technical_message: Technical message for logs
+        exc: Exception instance to log
+    """
+    # Log user-friendly message
+    log_user_message(logger, user_message)
+    
+    # Log technical details
+    log_exception(logger, technical_message, exc)
+
+
+def _format_technical_details(exception: Exception) -> str:
+    """
+    Format technical details for an exception.
+    
+    Args:
+        exception: The exception to format
+        
+    Returns:
+        Formatted technical details string
+    """
+    from .error_message_formatter import ErrorMessageFormatter
+    return ErrorMessageFormatter.format_technical_details(exception)
 
 
 def log_performance(logger: logging.Logger, operation: str, duration: float, **kwargs) -> None:

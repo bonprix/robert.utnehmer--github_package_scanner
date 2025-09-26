@@ -525,55 +525,66 @@ class BatchStrategyManager:
             return 1.2
     
     def _calculate_rate_limit_factor(self, rate_limit_remaining: int) -> float:
-        """Calculate batch size adjustment factor based on rate limits."""
-        # Conservative approach when rate limits are low
-        if rate_limit_remaining < 100:
-            return 0.3
+        """Calculate batch size adjustment factor based on rate limits.
+        
+        Optimized for maximum speed - only reduce batch size when absolutely necessary.
+        """
+        # Only reduce batch size when rate limits are critically low
+        if rate_limit_remaining < 50:
+            return 0.7  # Still aggressive - only 30% reduction when critically low
+        elif rate_limit_remaining < 200:
+            return 0.85  # Minimal reduction - only 15% when low
         elif rate_limit_remaining < 500:
-            return 0.6
-        elif rate_limit_remaining < 1000:
-            return 0.8
+            return 0.95  # Tiny reduction - only 5% when moderate
         else:
-            return 1.0
+            return 1.2  # Actually INCREASE batch size when we have plenty of rate limit
     
     def _calculate_network_factor(
         self, 
         network_conditions: Optional[NetworkConditions]
     ) -> float:
-        """Calculate batch size adjustment factor based on network conditions."""
+        """Calculate batch size adjustment factor based on network conditions.
+        
+        Optimized for maximum speed - assume good network and push harder.
+        """
         if network_conditions is None:
-            return 1.0
+            return 1.3  # Assume good network and be aggressive
         
-        # Good network conditions allow larger batches
+        # Good network conditions allow much larger batches
         if network_conditions.is_good:
-            return 1.2
+            return 1.5  # Very aggressive with good network
         
-        # Poor conditions require smaller batches
-        if network_conditions.error_rate > 0.1:
-            return 0.5
-        elif network_conditions.latency_ms > 500:
-            return 0.7
-        elif network_conditions.bandwidth_mbps < 5:
+        # Even with poor conditions, stay more aggressive for speed
+        if network_conditions.error_rate > 0.2:  # Only reduce for very high error rates
             return 0.8
+        elif network_conditions.latency_ms > 1000:  # Only reduce for very high latency
+            return 0.9
+        elif network_conditions.bandwidth_mbps < 2:  # Only reduce for very low bandwidth
+            return 0.9
         else:
-            return 1.0
+            return 1.2  # Still aggressive for moderate conditions
     
     def _calculate_performance_factor(self) -> float:
-        """Calculate batch size adjustment factor based on performance history."""
+        """Calculate batch size adjustment factor based on performance history.
+        
+        Optimized for maximum speed - push harder when performing well.
+        """
         if not self._performance_history:
-            return 1.0
+            return 1.2  # Start aggressive without history
         
         # Calculate average success rate from recent history
-        recent_metrics = self._performance_history[-3:]  # Last 3 batches
+        recent_metrics = self._performance_history[-5:]  # Look at more history for stability
         avg_success_rate = sum(m.success_rate for m in recent_metrics) / len(recent_metrics)
         
-        # Adjust based on success rate
-        if avg_success_rate > 95:
-            return 1.1  # Increase batch size for good performance
-        elif avg_success_rate < 80:
-            return 0.8  # Decrease batch size for poor performance
+        # Be more aggressive with good performance
+        if avg_success_rate > 98:
+            return 1.4  # Very aggressive increase for excellent performance
+        elif avg_success_rate > 90:
+            return 1.2  # Aggressive increase for good performance
+        elif avg_success_rate > 75:
+            return 1.0  # Maintain size for acceptable performance
         else:
-            return 1.0
+            return 0.9  # Only small reduction for poor performance
     
     def _determine_file_type(self, filename: str) -> str:
         """Determine file type from filename."""

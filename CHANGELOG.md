@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.0] - 2025-09-26
+
+### 🚨 Critical Security Update - Shai Hulud Worm Attack
+
+#### 🛡️ IOC Database Expansion
+- **Shai Hulud Worm Attack Coverage**: Added 500+ compromised npm packages from the Shai Hulud worm attack
+- **Worm Payload Detection**: Enhanced detection for first-of-its-kind worm payloads in npm packages
+- **Mobile Development Packages**: Added detection for compromised Capacitor and Cordova packages
+- **Framework Package Coverage**: Enhanced coverage for Ember, React, and Angular ecosystem packages
+- **Security Tooling Impersonation**: Added detection for malicious packages impersonating CrowdStrike tools
+
+#### 🔧 Repository Maintenance
+- **Documentation Organization**: Moved all summary documents to `docs/` directory
+- **Test Code Cleanup**: Removed temporary and development test files
+- **Clean Repository Structure**: Organized project for better maintainability
+
+#### 📊 Attack Intelligence
+- **Supply Chain Worm**: First documented worm payload in npm supply chain attacks
+- **Cross-Platform Targeting**: Attack affects web, mobile, and development tooling ecosystems
+- **Version-Specific IOCs**: Precise version targeting for accurate threat detection
+
 ## [1.4.0] - 2025-09-19
 
 ### 🎉 Major Release - Production Ready

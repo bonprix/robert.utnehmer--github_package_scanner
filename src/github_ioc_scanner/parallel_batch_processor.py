@@ -13,7 +13,7 @@ from .batch_models import (
 from .exceptions import RateLimitError, NetworkError, APIError
 from .logging_config import get_logger
 from .memory_monitor import MemoryMonitor
-from .rate_limit_manager import RateLimitManager
+from .rate_limit_manager import ParallelRateLimitManager as RateLimitManager
 from .resource_manager import ResourceManager, ResourceConfig, get_resource_manager
 from .retry_manager import RetryManager, RetryConfig
 
@@ -111,7 +111,7 @@ class ParallelBatchProcessor:
             original_size = len(requests)
             adjusted_size = self.memory_monitor.calculate_adjusted_batch_size(original_size)
             if adjusted_size < original_size:
-                logger.warning(f"Reducing batch size from {original_size} to {adjusted_size} due to memory pressure")
+                logger.debug(f"Reducing batch size from {original_size} to {adjusted_size} due to memory pressure")
                 requests = requests[:adjusted_size]
         
         logger.info(f"Processing batch of {len(requests)} requests with concurrency {self.current_concurrency}")

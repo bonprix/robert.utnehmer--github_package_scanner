@@ -14,10 +14,12 @@ from .batch_models import (
 from .batch_strategy_manager import BatchStrategyManager
 from .batch_progress_monitor import BatchProgressMonitor
 from .cache_manager import CacheManager
-from .exceptions import BatchProcessingError, ConfigurationError
-from .logging_config import get_logger
+from .exceptions import BatchProcessingError, ConfigurationError, RateLimitError
+from .logging_config import get_logger, log_user_message, log_exception_with_user_message
 from .models import Repository, IOCMatch
 from .parallel_batch_processor import ParallelBatchProcessor
+from .rate_limit_manager import RateLimitManager as BatchRateLimitManager
+from .error_message_formatter import ErrorMessageFormatter
 
 logger = get_logger(__name__)
 
@@ -59,6 +61,10 @@ class BatchCoordinator:
             enable_verbose_logging=True,
             update_interval_seconds=2.0
         )
+        
+        # Rate limit management
+        self.rate_limit_manager = BatchRateLimitManager()
+        self.error_formatter = ErrorMessageFormatter()
         
         # Coordination state
         self.active_operations: Dict[str, Dict[str, Any]] = {}
@@ -217,7 +223,7 @@ class BatchCoordinator:
             )
             
             if not repositories:
-                logger.warning(f"No repositories found in organization {organization}")
+                logger.info(f"No repositories found in organization {organization}")
                 await self._complete_operation(operation_id, success=True)
                 return {}
             
@@ -1191,28 +1197,13 @@ class BatchCoordinator:
                     logger.info(f"No target files found in repository {repository.full_name}")
                 return []
             
-            # Step 2: Fetch file contents
-            file_results = {}
-            for file_path in target_files:
-                try:
-                    logger.debug(f"Fetching content for {file_path} from {repository.full_name}")
-                    response = await self.github_client.get_file_content_async(repository, file_path)
-                    if response.data:
-                        file_results[file_path] = {
-                            'content': response.data.content,
-                            'sha': response.data.sha
-                        }
-                        logger.debug(f"Successfully fetched {file_path}, content length: {len(response.data.content)}")
-                    else:
-                        file_results[file_path] = {'error': 'No content available'}
-                        logger.debug(f"No content available for {file_path}")
-                except Exception as e:
-                    file_results[file_path] = {'error': str(e)}
-                    logger.warning(f"Failed to fetch {file_path} from {repository.full_name}: {e}")
+            # Step 2: Process files using batch processing with rate limit handling
+            priority_files = self._get_priority_files(target_files)
+            batch_file_results = await self.process_files_batch(repository, target_files, priority_files)
             
             # Step 3: Analyze file contents for IOC matches
-            batch_file_results = {'files': file_results}
-            logger.debug(f"Starting IOC analysis for {repository.full_name} with {len(file_results)} files")
+            files_processed = len(batch_file_results.get('files', {}))
+            logger.debug(f"Starting IOC analysis for {repository.full_name} with {files_processed} files")
             ioc_matches = await self._analyze_files_for_iocs(repository, batch_file_results)
             
             logger.debug(f"Found {len(ioc_matches)} IOC matches in repository {repository.full_name}")
@@ -1220,7 +1211,7 @@ class BatchCoordinator:
             # Store file count for statistics (temporary solution)
             if not hasattr(self, '_files_processed_count'):
                 self._files_processed_count = {}
-            self._files_processed_count[repository.full_name] = len(file_results)
+            self._files_processed_count[repository.full_name] = files_processed
             
             return ioc_matches
             
@@ -1233,7 +1224,7 @@ class BatchCoordinator:
         repository: Repository,
         file_patterns: Optional[List[str]]
     ) -> List[str]:
-        """Discover files to scan in a repository using GitHub Tree API.
+        """Discover files to scan in a repository using GitHub Tree API with graceful rate limit handling.
         
         Args:
             repository: Repository to discover files in
@@ -1262,9 +1253,13 @@ class BatchCoordinator:
             
             # Use GitHub Tree API to get all files in the repository efficiently
             try:
-                tree_response = await self.github_client.get_tree_async(repository)
+                tree_response = await self._make_rate_limited_request(
+                    lambda: self.github_client.get_tree_async(repository),
+                    repository.full_name,
+                    "tree discovery"
+                )
                 
-                if not tree_response.data:
+                if not tree_response or not tree_response.data:
                     logger.debug(f"No tree data returned for {repository.full_name}, falling back to individual file checks")
                     return await self._discover_repository_files_fallback(repository, file_patterns)
                 
@@ -1323,13 +1318,26 @@ class BatchCoordinator:
                 logger.debug(f"Found {len(found_files)} files using tree API: {found_files[:3]}{'...' if len(found_files) > 3 else ''}")
                 return found_files
                 
+            except RateLimitError as e:
+                # Handle rate limit gracefully
+                await self._handle_rate_limit_error(e, repository.full_name, "tree discovery")
+                # Fall back to the old method if rate limit persists
+                return await self._discover_repository_files_fallback(repository, file_patterns)
             except Exception as e:
-                logger.warning(f"Tree API failed for {repository.full_name}: {e}")
+                # Log technical details for debugging but show user-friendly message
+                if self.error_formatter.should_suppress_error(e):
+                    logger.debug(f"Tree API error for {repository.full_name}: {self.error_formatter.format_technical_details(e)}")
+                else:
+                    logger.warning(f"Tree API failed for {repository.full_name}: {e}")
                 # Fall back to the old method if tree API fails
                 return await self._discover_repository_files_fallback(repository, file_patterns)
             
         except Exception as e:
-            logger.warning(f"Failed to discover files in {repository.full_name}: {e}")
+            # Log technical details for debugging but show user-friendly message
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"File discovery error for {repository.full_name}: {self.error_formatter.format_technical_details(e)}")
+            else:
+                logger.warning(f"Failed to discover files in {repository.full_name}: {e}")
             return []
     
     def _matches_file_pattern(self, full_path: str, filename: str, pattern: str) -> bool:
@@ -1359,7 +1367,7 @@ class BatchCoordinator:
         repository: Repository,
         file_patterns: Optional[List[str]]
     ) -> List[str]:
-        """Fallback method for file discovery using individual file checks.
+        """Fallback method for file discovery using individual file checks with rate limit handling.
         
         Args:
             repository: Repository to discover files in
@@ -1390,24 +1398,42 @@ class BatchCoordinator:
             
             # Check which files actually exist by trying to fetch them
             found_files = []
-            logger.debug(f"Fallback - checking {len(search_patterns)} patterns")
+            logger.debug(f"Fallback - checking {len(search_patterns)} patterns with rate limit handling")
             
             # Limit the number of patterns to avoid too many API calls
             limited_patterns = search_patterns[:50]  # Limit to first 50 patterns
             
             for pattern in limited_patterns:
                 try:
-                    response = await self.github_client.get_file_content_async(repository, pattern)
-                    if response.data:
+                    response = await self._make_rate_limited_request(
+                        lambda: self.github_client.get_file_content_async(repository, pattern),
+                        repository.full_name,
+                        f"fallback file check ({pattern})"
+                    )
+                    if response and response.data:
                         found_files.append(pattern)
                         logger.debug(f"Fallback found {pattern}")
-                except Exception:
+                except RateLimitError as e:
+                    # Rate limit already handled by _make_rate_limited_request
+                    logger.debug(f"Rate limit during fallback check for {pattern}")
+                    continue
+                except Exception as e:
+                    # Log technical details for debugging but don't show to user
+                    if self.error_formatter.should_suppress_error(e):
+                        logger.debug(f"Fallback file check error for {pattern}: {self.error_formatter.format_technical_details(e)}")
+                    else:
+                        logger.debug(f"Fallback file check failed for {pattern}: {e}")
                     continue
             
+            logger.debug(f"Fallback discovery completed for {repository.full_name}: {len(found_files)} files found")
             return found_files
             
         except Exception as e:
-            logger.warning(f"Fallback file discovery failed for {repository.full_name}: {e}")
+            # Log technical details for debugging but show user-friendly message
+            if self.error_formatter.should_suppress_error(e):
+                logger.debug(f"Fallback file discovery error for {repository.full_name}: {self.error_formatter.format_technical_details(e)}")
+            else:
+                logger.warning(f"Fallback file discovery failed for {repository.full_name}: {e}")
             return []
     
     def _get_priority_files(self, file_paths: List[str]) -> List[str]:
@@ -1431,6 +1457,120 @@ class BatchCoordinator:
                 priority_files.append(file_path)
         
         return priority_files
+    
+    async def _make_rate_limited_request(self, request_func, repo_name: str, operation: str):
+        """Make a request with rate limit handling and progress tracking.
+        
+        Args:
+            request_func: Function that makes the actual request
+            repo_name: Repository name for logging
+            operation: Description of the operation for logging
+            
+        Returns:
+            Response from the request function
+        """
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # Check if we're currently rate limited
+                if self.rate_limit_manager.is_rate_limited():
+                    wait_time = self.rate_limit_manager.get_wait_time()
+                    if self.rate_limit_manager.should_show_message():
+                        user_message = self.error_formatter.format_waiting_message(wait_time)
+                        logger.info(f"⏳ {user_message}")
+                    
+                    # Update progress tracking to account for rate limit delay
+                    await self._update_progress_for_rate_limit_delay(wait_time, operation)
+                    
+                    # Wait for rate limit to reset
+                    await asyncio.sleep(wait_time)
+                    self.rate_limit_manager.clear_expired_limits()
+                
+                # Make the request
+                return await request_func()
+                
+            except RateLimitError as e:
+                retry_count += 1
+                await self._handle_rate_limit_error(e, repo_name, operation)
+                
+                if retry_count >= max_retries:
+                    logger.warning(f"Max retries exceeded for {operation} on {repo_name}")
+                    raise
+                    
+            except Exception as e:
+                # For non-rate-limit errors, don't retry
+                raise
+        
+        return None
+    
+    async def _handle_rate_limit_error(self, error: RateLimitError, repo_name: str, operation: str):
+        """Handle a rate limit error with user-friendly messaging and progress tracking.
+        
+        Args:
+            error: The rate limit error that occurred
+            repo_name: Repository name for context
+            operation: Operation that was being performed
+        """
+        # Extract reset time from error if available
+        reset_time = self.error_formatter.extract_reset_time_from_exception(error)
+        if not reset_time:
+            # Default to 60 seconds if no reset time available
+            from datetime import datetime, timedelta
+            reset_time = datetime.now() + timedelta(seconds=60)
+        
+        # Update rate limit manager
+        is_secondary = 'secondary' in str(error).lower() or 'abuse' in str(error).lower()
+        self.rate_limit_manager.handle_rate_limit(reset_time, is_secondary)
+        
+        # Show user-friendly message if appropriate
+        if self.rate_limit_manager.should_show_message():
+            user_message = self.error_formatter.format_rate_limit_message(reset_time, repo_name)
+            logger.info(f"🚦 {user_message}")
+        
+        # Log technical details for debugging
+        technical_details = self.error_formatter.format_technical_details(error)
+        logger.debug(f"Rate limit details for {operation} on {repo_name}: {technical_details}")
+        
+        # Update progress tracking
+        wait_time = self.rate_limit_manager.get_wait_time()
+        await self._update_progress_for_rate_limit_delay(wait_time, operation)
+    
+    async def _update_progress_for_rate_limit_delay(self, wait_time: int, operation: str):
+        """Update progress tracking to account for rate limit delays.
+        
+        Args:
+            wait_time: Number of seconds to wait
+            operation: Operation being delayed
+        """
+        # Update the progress monitor's ETA calculation to account for the delay
+        if hasattr(self.progress_monitor, 'add_delay'):
+            self.progress_monitor.add_delay(wait_time, f"Rate limit delay for {operation}")
+        
+        # Log progress update with rate limit context
+        logger.debug(f"Progress tracking: Adding {wait_time}s delay for rate limit during {operation}")
+    
+    def get_coordination_statistics(self) -> Dict[str, Any]:
+        """Get comprehensive coordination statistics including rate limit info.
+        
+        Returns:
+            Dictionary with coordination statistics
+        """
+        base_stats = self.cache_coordinator.get_coordination_statistics()
+        
+        # Add rate limit statistics
+        rate_limit_stats = self.rate_limit_manager.get_status_summary()
+        
+        # Combine statistics
+        comprehensive_stats = {
+            **base_stats,
+            'rate_limit_status': rate_limit_stats,
+            'active_operations': len(self.active_operations),
+            'total_operations': self.operation_counter
+        }
+        
+        return comprehensive_stats
     
     async def _analyze_files_for_iocs(
         self,
@@ -1480,15 +1620,23 @@ class BatchCoordinator:
                     continue
                 
                 try:
-                    # Create FileContent object
-                    file_content = FileContent(
-                        content=file_data['content'],
-                        sha=file_data.get('sha', 'unknown'),
-                        size=len(file_data['content'])
-                    )
+                    # Handle both string content and FileContent objects
+                    content_data = file_data['content']
+                    if isinstance(content_data, FileContent):
+                        # Already a FileContent object
+                        file_content = content_data
+                        actual_content = content_data.content
+                    else:
+                        # String content, create FileContent object
+                        file_content = FileContent(
+                            content=content_data,
+                            sha=file_data.get('sha', 'unknown'),
+                            size=len(content_data)
+                        )
+                        actual_content = content_data
                     
                     # Parse packages from file content
-                    packages = parse_file_safely(file_path, file_content.content)
+                    packages = parse_file_safely(file_path, actual_content)
                     
                     if not packages:
                         logger.debug(f"No packages found in {file_path}")

@@ -37,6 +37,9 @@ class ScanConfig:
     verbose: bool = False
     log_file: Optional[str] = None
     quiet: bool = False
+    debug_rate_limits: bool = False
+    show_stack_traces: bool = False
+    suppress_rate_limit_messages: bool = False
     # Batch processing options
     enable_batch_processing: bool = True
     batch_size: Optional[int] = None
@@ -44,6 +47,10 @@ class ScanConfig:
     batch_strategy: Optional[str] = None
     enable_cross_repo_batching: Optional[bool] = None
     batch_config_file: Optional[str] = None
+    # Rate limiting options
+    rate_limit_strategy: str = "normal"
+    enable_intelligent_rate_limiting: bool = True
+    rate_limit_safety_margin: int = 50
 
 
 @dataclass

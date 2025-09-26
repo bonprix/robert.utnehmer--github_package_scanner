@@ -178,24 +178,30 @@ class PrioritizedFile:
 class BatchConfig:
     """Configuration for batch processing."""
     
-    # Concurrency settings - optimized for performance
-    max_concurrent_requests: int = 20  # Further increased for better throughput
-    max_concurrent_repos: int = 8      # Further increased for parallel processing
+    # Concurrency settings - maximized for speed (not local resource conservation)
+    max_concurrent_requests: int = 50  # Significantly increased for maximum throughput
+    max_concurrent_repos: int = 15     # Increased for maximum parallel processing
     
-    # Batch size settings
-    default_batch_size: int = 10
-    max_batch_size: int = 50
-    min_batch_size: int = 1
+    # Batch size settings - optimized for maximum speed
+    default_batch_size: int = 25      # Increased from 10 for better throughput
+    max_batch_size: int = 100         # Increased from 50 for maximum speed
+    min_batch_size: int = 5           # Increased from 1 to maintain efficiency
     
-    # Performance settings
-    rate_limit_buffer: float = 0.8  # Use 80% of available rate limit (more aggressive)
-    retry_attempts: int = 3
-    retry_delay_base: float = 1.0    # Reduced base delay for faster retries
+    # Performance settings - optimized for maximum speed
+    rate_limit_buffer: float = 0.95  # Use 95% of available rate limit (very aggressive)
+    retry_attempts: int = 5          # More retries for resilience at high speed
+    retry_delay_base: float = 0.5    # Faster retries for maximum speed
     
-    # Rate limiting settings
+    # Rate limiting settings - optimized for speed over safety
     enable_proactive_rate_limiting: bool = True
-    rate_limit_safety_margin: int = 50   # Reduced safety margin for more aggressive processing
+    rate_limit_safety_margin: int = 20   # Minimal safety margin for maximum speed
     adaptive_delay_enabled: bool = True
+    
+    # Intelligent rate limiting settings
+    rate_limit_strategy: str = "normal"  # Options: conservative, normal, aggressive
+    enable_budget_distribution: bool = True
+    enable_adaptive_timing: bool = True
+    budget_redistribution_interval: int = 300  # Seconds between budget redistributions
     
     # Memory settings
     max_memory_usage_mb: int = 500
