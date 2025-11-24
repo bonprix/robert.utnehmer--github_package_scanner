@@ -52,6 +52,14 @@ git clone https://github.com/christianherweg0807/github_package_scanner.git
 cd github_package_scanner
 pip install -e .
 ```
+### Locally via docker
+
+```bash
+git clone https://github.com/christianherweg0807/github_package_scanner.git
+cd github_package_scanner
+docker build -t github-ioc-scanner .
+docker run -e GITHUB_TOKEN=ghp_xyz -t github-ioc-scanner --org your-org <etc> 
+```
 
 ### Development Installation
 
