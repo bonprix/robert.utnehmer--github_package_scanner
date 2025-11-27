@@ -14,7 +14,7 @@ class ScanConfig:
     team_first_org: bool = False  # New team-first organization scan mode
     fast_mode: bool = False
     include_archived: bool = False
-    issues_dir: Optional[str] = "issues"
+    issues_dir: Optional[str] = None
     ioc_files: Optional[List[str]] = None
     # SBOM scanning options
     enable_sbom: bool = True

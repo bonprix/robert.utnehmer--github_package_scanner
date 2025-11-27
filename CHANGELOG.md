@@ -2,6 +2,125 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.5.4] - 2024-11-26
+
+### 🚨 Critical Security Update - Extended Shai Hulud 2.0 IOC Database
+
+#### 📦 Expanded Package Coverage
+- **795 Compromised Packages**: Updated from official Wiz Security IOC list (+256 packages)
+- **1,089 Package-Version Combinations**: Complete version-specific detection
+- **Official Source**: Direct integration of Wiz Security's authoritative CSV data
+
+#### 🎯 Newly Added Organizations & Packages
+- **BrowserBase**: 8 packages (AI browser automation platform)
+- **Additional Zapier packages**: Extended coverage
+- **Additional AsyncAPI packages**: More comprehensive detection
+- **Additional Postman packages**: Enhanced binary and MCP coverage
+- **Additional PostHog packages**: Expanded plugin and integration coverage
+- **Additional ENS Domains packages**: More thorough blockchain tooling coverage
+- **Additional Voiceflow packages**: Complete conversational AI platform coverage
+- **Hundreds of additional packages**: Development tools, React Native libraries, testing frameworks
+
+#### 📊 Updated Metrics
+- **Total IOC Database**: 2,932 packages (previously 2,676)
+- **Shai Hulud 2.0**: 795 packages (previously 539)
+- **Detection Accuracy**: Version-specific matching from official Wiz CSV
+
+#### 📚 Source Attribution
+- **Primary Source**: https://github.com/wiz-sec-public/wiz-research-iocs
+- **CSV Data**: shai-hulud-2-packages.csv (official Wiz Security IOC list)
+- **Research**: Wiz.io blog, Socket.dev analysis
+
+## [1.5.3] - 2024-11-24
+
+### 🐛 Bug Fix
+
+#### Fixed Issues Directory Resolution
+- **Default Value Fixed**: Changed `issues_dir` default from `"issues"` to `None` in `ScanConfig`
+- **Built-in IOCs Now Default**: When no custom issues directory is specified, the scanner now correctly uses built-in IOC definitions from the installed package
+- **Error Prevention**: Eliminates "IOC definitions directory not found: issues" error when running without custom IOC files
+- **Backward Compatible**: Custom issues directories still work as expected when explicitly specified
+
+#### Technical Details
+- Modified `models.py`: `issues_dir: Optional[str] = None` (was `"issues"`)
+- IOCLoader logic unchanged: When `issues_dir=None`, automatically uses package's built-in issues directory
+- Affects all CLI operations that don't specify `--issues-dir` parameter
+
+## [1.5.2] - 2024-11-24
+
+### 🚨 Critical Security Update - Shai Hulud 2.0 Complete IOC Database
+
+#### 📦 Comprehensive Package Coverage
+- **533 Compromised npm Packages**: Complete and verified IOC database from Socket.dev research
+- **All Major Ecosystems Covered**: Every compromised package from the November 2024 campaign
+- **Version-Specific Detection**: Precise version numbers for all affected packages
+
+#### 🎯 Enhanced Organizational Coverage
+- **Zapier**: 16 packages (platform automation, SDK, and integration tools)
+- **AsyncAPI**: 41 packages (API specification, code generation, templates)
+- **Postman**: 17 packages (API development, testing, binary distributions)
+- **PostHog**: 52 packages (analytics, plugins, integrations)
+- **ENS Domains**: 46 packages (Ethereum Name Service infrastructure)
+- **Voiceflow**: 56 packages (conversational AI platform)
+- **Accord Project**: 7 packages (smart contract templates)
+- **300+ Additional Packages**: Development tools, React Native libraries, testing frameworks
+
+#### 🔬 Detailed Attack Intelligence
+- **Payload Files**: setup_bun.js (10MB obfuscated script), bun_environment.js
+- **Attack Vector**: Preinstall script execution with silent output suppression
+- **Multi-Cloud Targeting**: AWS, Azure, GCP credential harvesting
+- **GitHub Actions Exploitation**: Workflow injection for persistence
+- **Docker Breakout**: Privileged container escape attempts
+
+#### 🌐 Network & File IOCs
+- **Exfiltration Domain**: webhook.site
+- **Artifact Files**: cloud.json, contents.json, environment.json, truffleSecrets.json
+- **Malicious Workflows**: discussion.yaml, formatter_123456789.yml
+- **Self-Hosted Runner**: SHA1HULUD identifier
+
+#### 📊 Impact Metrics
+- **25,000+ Affected Repositories**: Across ~350 unique GitHub users
+- **Attack Window**: November 21-24, 2024 (confirmed)
+- **Continuous Discovery**: New repositories being created every 30 minutes during peak
+
+#### 📚 Source Attribution
+- **Primary Source**: Socket.dev comprehensive analysis
+- **Additional Sources**: Wiz.io, GitHub wiz-sec-public IOCs
+- **Research Links**: Complete documentation in shai_hulud_2.py
+
+## [1.5.1] - 2024-11-24
+
+### 🚨 Critical Security Update - Shai Hulud 2.0 Worm Attack
+
+#### 🛡️ New IOC Database - Shai Hulud 2.0
+- **533+ Compromised Packages**: Complete coverage of the November 2024 Shai Hulud 2.0 campaign
+- **Major Ecosystem Impact**: Added detection for compromised packages from:
+  - **Zapier** (16 packages): Platform automation and integration tools
+  - **AsyncAPI** (36 packages): API specification and code generation tools
+  - **Postman** (16 packages): API development and testing ecosystem
+  - **PostHog** (47 packages): Product analytics and feature management
+  - **ENS Domains** (46 packages): Ethereum Name Service infrastructure
+  - **Voiceflow** (56 packages): Conversational AI development platform
+  - **300+ Additional Packages**: Wide range of development tools and libraries
+
+#### 🔍 Enhanced Attack Intelligence
+- **Preinstall Script Execution**: New attack vector using preinstall lifecycle scripts
+- **Multi-Cloud Targeting**: AWS, Azure, and GCP credential theft capabilities
+- **Docker Privilege Escalation**: Container breakout attempts detected
+- **GitHub Actions Injection**: Malicious workflow injection for persistence
+- **New Payload Files**: `setup_bun.js` and `bun_environment.js` detection
+
+#### 📊 Attack Indicators
+- **GitHub IOCs**: Detection for malicious workflows, self-hosted runners (SHA1HULUD)
+- **File Artifacts**: cloud.json, contents.json, environment.json, truffleSecrets.json
+- **Network IOCs**: webhook.site exfiltration domain detection
+- **MITRE ATT&CK Mapping**: Complete TTP documentation
+
+#### 📚 Documentation Updates
+- **Source Attribution**: Wiz.io, Socket.dev, and GitHub wiz-sec-public IOCs
+- **Attack Timeline**: November 21-24, 2024 compromise window documented
+- **Impact Scope**: 25,000+ affected repositories across ~350 users
+
 ## [1.5.0] - 2025-09-26
 
 ### 🚨 Critical Security Update - Shai Hulud Worm Attack
