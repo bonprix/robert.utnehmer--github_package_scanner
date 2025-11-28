@@ -11,15 +11,15 @@ class TestBatchConfig:
         """Test that default configuration is valid."""
         config = BatchConfig()
         
-        # Test default values
-        assert config.max_concurrent_requests == 10
-        assert config.max_concurrent_repos == 3
-        assert config.default_batch_size == 10
-        assert config.max_batch_size == 50
-        assert config.min_batch_size == 1
-        assert config.rate_limit_buffer == 0.8
-        assert config.retry_attempts == 3
-        assert config.retry_delay_base == 1.0
+        # Test default values (optimized for maximum speed)
+        assert config.max_concurrent_requests == 50
+        assert config.max_concurrent_repos == 15
+        assert config.default_batch_size == 25
+        assert config.max_batch_size == 100
+        assert config.min_batch_size == 5
+        assert config.rate_limit_buffer == 0.95
+        assert config.retry_attempts == 5
+        assert config.retry_delay_base == 0.5
         assert config.max_memory_usage_mb == 500
         assert config.stream_large_files_threshold == 1024 * 1024
         assert config.default_strategy == BatchStrategy.ADAPTIVE

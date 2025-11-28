@@ -63,7 +63,7 @@ class TestAuthenticationErrorHandling:
         github_client = Mock(spec=GitHubClient)
         
         # Mock authentication error
-        github_client.get_organization_repos.side_effect = AuthenticationError("Bad credentials")
+        github_client.get_organization_repos_graphql.side_effect = AuthenticationError("Bad credentials")
         
         scanner = GitHubIOCScanner(config, github_client, cache_manager, ioc_loader)
         
@@ -83,7 +83,7 @@ class TestAuthenticationErrorHandling:
         github_client = Mock(spec=GitHubClient)
         
         # Mock permission error
-        github_client.get_organization_repos.side_effect = AuthenticationError("Must be an organization member")
+        github_client.get_organization_repos_graphql.side_effect = AuthenticationError("Must be an organization member")
         
         scanner = GitHubIOCScanner(config, github_client, cache_manager, ioc_loader)
         
@@ -147,7 +147,7 @@ class TestRateLimitHandling:
         
         # Mock rate limit followed by success
         reset_time = int(time.time()) + 1  # Reset in 1 second
-        github_client.get_organization_repos.side_effect = [
+        github_client.get_organization_repos_graphql.side_effect = [
             RateLimitError("API rate limit exceeded", reset_time=reset_time),
             APIResponse(data=[], etag='"empty-etag"')
         ]
@@ -159,7 +159,7 @@ class TestRateLimitHandling:
         assert isinstance(results, ScanResults)
         
         # Verify retry occurred
-        assert github_client.get_organization_repos.call_count == 2
+        assert github_client.get_organization_repos_graphql.call_count == 2
 
     def test_multiple_rate_limits(self, temp_cache_dir, temp_issues_dir):
         """Test handling of multiple consecutive rate limits."""
@@ -174,7 +174,7 @@ class TestRateLimitHandling:
         
         # Mock multiple rate limits followed by success
         reset_time = int(time.time()) + 1
-        github_client.get_organization_repos.side_effect = [
+        github_client.get_organization_repos_graphql.side_effect = [
             RateLimitError("API rate limit exceeded", reset_time=reset_time),
             RateLimitError("API rate limit exceeded", reset_time=reset_time),
             APIResponse(data=[], etag='"empty-etag"')
@@ -187,7 +187,7 @@ class TestRateLimitHandling:
         assert isinstance(results, ScanResults)
         
         # Verify multiple retries occurred
-        assert github_client.get_organization_repos.call_count == 3
+        assert github_client.get_organization_repos_graphql.call_count == 3
 
     def test_rate_limit_during_file_fetching(self, temp_cache_dir, temp_issues_dir):
         """Test rate limit handling during file content fetching."""
@@ -267,7 +267,7 @@ class TestNetworkErrorHandling:
         
         # Mock network timeout followed by success
         import requests
-        github_client.get_organization_repos.side_effect = [
+        github_client.get_organization_repos_graphql.side_effect = [
             requests.exceptions.Timeout("Request timed out"),
             APIResponse(data=[], etag='"empty-etag"')
         ]
@@ -279,7 +279,7 @@ class TestNetworkErrorHandling:
         assert isinstance(results, ScanResults)
         
         # Verify retry occurred
-        assert github_client.get_organization_repos.call_count == 2
+        assert github_client.get_organization_repos_graphql.call_count == 2
 
     def test_connection_error_handling(self, temp_cache_dir, temp_issues_dir):
         """Test connection error handling."""
@@ -294,7 +294,7 @@ class TestNetworkErrorHandling:
         
         # Mock connection error
         import requests
-        github_client.get_organization_repos.side_effect = requests.exceptions.ConnectionError("Connection failed")
+        github_client.get_organization_repos_graphql.side_effect = requests.exceptions.ConnectionError("Connection failed")
         
         scanner = GitHubIOCScanner(config, github_client, cache_manager, ioc_loader)
         
@@ -331,7 +331,7 @@ class TestNetworkErrorHandling:
             )
         ]
         
-        github_client.get_organization_repos.return_value = APIResponse(
+        github_client.get_organization_repos_graphql.return_value = APIResponse(
             data=mock_repos,
             etag='"repos-etag"'
         )

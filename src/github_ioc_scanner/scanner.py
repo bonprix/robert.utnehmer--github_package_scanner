@@ -26,10 +26,12 @@ from .logging_config import (
     get_logger, log_exception, log_performance, log_user_message, 
     log_rate_limit_debug, log_exception_with_user_message
 )
-from .models import ScanConfig, ScanResults, Repository, IOCMatch, CacheStats, FileContent, FileInfo, PackageDependency
+from .models import ScanConfig, ScanResults, Repository, IOCMatch, CacheStats, FileContent, FileInfo, PackageDependency, WorkflowFinding, SecretFinding
 from .parsers.factory import get_parser, parse_file_safely
 # Import parsers module to ensure all parsers are registered
 from . import parsers
+from .workflow_scanner import WorkflowScanner
+from .secrets_scanner import SecretsScanner
 
 logger = get_logger(__name__)
 
@@ -54,6 +56,7 @@ class GitHubIOCScanner:
         "go.mod",
         "go.sum",
         "Cargo.lock",
+        "pom.xml",  # Maven support
     ]
     
     # SBOM file patterns
@@ -134,10 +137,22 @@ class GitHubIOCScanner:
             # Configure progress monitoring if callback is provided
             if self.progress_callback:
                 self._setup_batch_progress_monitoring()
+        
+        # Initialize workflow scanner if workflow scanning is enabled
+        self.workflow_scanner: Optional[WorkflowScanner] = None
+        if config.scan_workflows:
+            self.workflow_scanner = WorkflowScanner()
+        
+        # Initialize secrets scanner if secrets scanning is enabled
+        self.secrets_scanner: Optional[SecretsScanner] = None
+        if config.scan_secrets:
+            self.secrets_scanner = SecretsScanner()
     
     def _scan_team_repositories_sequential(self, repos_to_scan, team_name, ioc_hash, remaining_repos, total_repos_scanned, total_files_scanned):
         """Scan team repositories using sequential processing."""
         team_matches = []
+        team_workflow_findings = []
+        team_secret_findings = []
         team_files_scanned = 0
         
         for j, repo in enumerate(repos_to_scan, 1):
@@ -147,6 +162,26 @@ class GitHubIOCScanner:
             matches, files_scanned = self.scan_repository_for_iocs(repo, ioc_hash)
             team_matches.extend(matches)
             team_files_scanned += files_scanned
+            
+            # Scan workflows if enabled
+            if self.config.scan_workflows and self.workflow_scanner:
+                logger.info(f"Scanning workflows in {repo.full_name}...")
+                workflow_findings = self._scan_workflows(repo)
+                team_workflow_findings.extend(workflow_findings)
+                if workflow_findings:
+                    logger.info(f"Found {len(workflow_findings)} workflow security issues in {repo.full_name}")
+                else:
+                    logger.debug(f"No workflow issues found in {repo.full_name}")
+            
+            # Scan for secrets if enabled
+            if self.config.scan_secrets and self.secrets_scanner:
+                logger.info(f"Scanning secrets in {repo.full_name}...")
+                secret_findings = self._scan_secrets(repo)
+                team_secret_findings.extend(secret_findings)
+                if secret_findings:
+                    logger.info(f"Found {len(secret_findings)} secrets in {repo.full_name}")
+                else:
+                    logger.debug(f"No secrets found in {repo.full_name}")
             
             # Update scan state with progress
             if self.current_scan_state:
@@ -173,7 +208,7 @@ class GitHubIOCScanner:
         if not self.config.quiet and repos_to_scan:
             print()  # New line after progress
             
-        return team_matches, team_files_scanned
+        return team_matches, team_files_scanned, team_workflow_findings, team_secret_findings
 
     def _run_team_batch_processing(self, repositories, strategy, file_patterns):
         """Run batch processing for team repositories synchronously."""
@@ -478,6 +513,8 @@ class GitHubIOCScanner:
                 
                 # Convert batch results to IOC matches
                 all_matches = []
+                all_workflow_findings = []
+                all_secret_findings = []
                 successful_repos = len(batch_results)  # All repositories that were processed
                 total_files_scanned = 0
                 
@@ -488,6 +525,40 @@ class GitHubIOCScanner:
                 # Get actual number of files processed from batch coordinator
                 total_files_scanned = self.batch_coordinator.get_total_files_processed() if self.batch_coordinator else len(batch_results)
 
+                # Scan workflows and secrets for each repository
+                scan_workflows = self.config.scan_workflows and self.workflow_scanner
+                scan_secrets = self.config.scan_secrets and self.secrets_scanner
+                
+                if scan_workflows or scan_secrets:
+                    scan_types = []
+                    if scan_workflows:
+                        scan_types.append("workflows")
+                    if scan_secrets:
+                        scan_types.append("secrets")
+                    
+                    if not self.config.quiet:
+                        print(f"\n🔍 Scanning {' & '.join(scan_types)} in {len(repositories)} repositories (parallel)...")
+                    
+                    # Use parallel scanning for better performance
+                    workflow_findings_batch, secret_findings_batch = self._scan_workflows_and_secrets_parallel(
+                        repositories,
+                        scan_workflows=scan_workflows,
+                        scan_secrets=scan_secrets,
+                        max_workers=min(10, len(repositories))  # More workers for larger batches
+                    )
+                    all_workflow_findings.extend(workflow_findings_batch)
+                    all_secret_findings.extend(secret_findings_batch)
+                    
+                    if not self.config.quiet:
+                        print()  # New line after progress
+                
+                # Log workflow findings summary
+                if all_workflow_findings:
+                    logger.info(f"Found {len(all_workflow_findings)} workflow security issues across all repositories")
+                
+                # Log secret findings summary
+                if all_secret_findings:
+                    logger.info(f"Found {len(all_secret_findings)} secrets across all repositories")
                 
                 scan_duration = time.time() - start_time
                 log_performance(
@@ -509,7 +580,9 @@ class GitHubIOCScanner:
                     matches=all_matches,
                     cache_stats=self.cache_manager.get_cache_stats(),
                     repositories_scanned=successful_repos,
-                    files_scanned=total_files_scanned
+                    files_scanned=total_files_scanned,
+                    workflow_findings=all_workflow_findings if all_workflow_findings else None,
+                    secret_findings=all_secret_findings if all_secret_findings else None
                 )
                 
             finally:
@@ -595,6 +668,8 @@ class GitHubIOCScanner:
         
         # Initialize overall results
         all_matches = []
+        all_workflow_findings = []
+        all_secret_findings = []
         total_files_scanned = 0
         total_repos_scanned = 0
         
@@ -730,6 +805,39 @@ class GitHubIOCScanner:
                             # Remove from remaining repositories
                             remaining_repos.pop(repo_name, None)
                         
+                        # Scan workflows and secrets for batch-processed repositories
+                        # (batch processing only handles IOC matching, not workflow/secrets scanning)
+                        team_workflow_findings = []
+                        team_secret_findings = []
+                        
+                        scan_workflows = self.config.scan_workflows and self.workflow_scanner
+                        scan_secrets = self.config.scan_secrets and self.secrets_scanner
+                        
+                        if scan_workflows or scan_secrets:
+                            scan_types = []
+                            if scan_workflows:
+                                scan_types.append("workflows")
+                            if scan_secrets:
+                                scan_types.append("secrets")
+                            
+                            if not self.config.quiet:
+                                print()  # New line after batch processing progress
+                                print(f"     🔍 Scanning {' & '.join(scan_types)} (parallel)...")
+                            
+                            # Use parallel scanning for better performance
+                            team_workflow_findings, team_secret_findings = self._scan_workflows_and_secrets_parallel(
+                                repos_to_scan,
+                                scan_workflows=scan_workflows,
+                                scan_secrets=scan_secrets,
+                                max_workers=min(5, len(repos_to_scan))  # Limit workers to avoid rate limiting
+                            )
+                            
+                            if not self.config.quiet:
+                                print()  # New line after progress
+                        
+                        all_workflow_findings.extend(team_workflow_findings)
+                        all_secret_findings.extend(team_secret_findings)
+                        
                         # Save state after batch processing
                         if self.current_scan_state:
                             self.scan_state_manager.save_state(self.current_scan_state)
@@ -737,15 +845,19 @@ class GitHubIOCScanner:
                     except Exception as e:
                         logger.warning(f"Batch processing failed for team {team_name}, falling back to sequential: {e}")
                         # Fall back to sequential processing
-                        team_matches, team_files_scanned = self._scan_team_repositories_sequential(
+                        team_matches, team_files_scanned, team_workflow_findings, team_secret_findings = self._scan_team_repositories_sequential(
                             repos_to_scan, team_name, ioc_hash, remaining_repos, total_repos_scanned, total_files_scanned
                         )
+                        all_workflow_findings.extend(team_workflow_findings)
+                        all_secret_findings.extend(team_secret_findings)
                         total_repos_scanned += len(repos_to_scan)
                 else:
                     # Use sequential processing for single repository or when batch processing is disabled
-                    team_matches, team_files_scanned = self._scan_team_repositories_sequential(
+                    team_matches, team_files_scanned, team_workflow_findings, team_secret_findings = self._scan_team_repositories_sequential(
                         repos_to_scan, team_name, ioc_hash, remaining_repos, total_repos_scanned, total_files_scanned
                     )
+                    all_workflow_findings.extend(team_workflow_findings)
+                    all_secret_findings.extend(team_secret_findings)
                     total_repos_scanned += len(repos_to_scan)
                 
                 if not self.config.quiet:
@@ -793,6 +905,20 @@ class GitHubIOCScanner:
                 matches, files_scanned = self.scan_repository_for_iocs(repo, ioc_hash)
                 remaining_matches.extend(matches)
                 remaining_files_scanned += files_scanned
+                
+                # Scan workflows if enabled
+                if self.config.scan_workflows and self.workflow_scanner:
+                    workflow_findings = self._scan_workflows(repo)
+                    all_workflow_findings.extend(workflow_findings)
+                    if workflow_findings:
+                        logger.info(f"Found {len(workflow_findings)} workflow security issues in {repo.full_name}")
+                
+                # Scan for secrets if enabled
+                if self.config.scan_secrets and self.secrets_scanner:
+                    secret_findings = self._scan_secrets(repo)
+                    all_secret_findings.extend(secret_findings)
+                    if secret_findings:
+                        logger.info(f"Found {len(secret_findings)} secrets in {repo.full_name}")
             
             if not self.config.quiet:
                 print()  # New line after progress
@@ -813,6 +939,14 @@ class GitHubIOCScanner:
             total_files_scanned += remaining_files_scanned
             total_repos_scanned += len(remaining_repo_list)
         
+        # Log workflow findings summary
+        if all_workflow_findings:
+            logger.info(f"Found {len(all_workflow_findings)} workflow security issues across all repositories")
+        
+        # Log secret findings summary
+        if all_secret_findings:
+            logger.info(f"Found {len(all_secret_findings)} secrets across all repositories")
+        
         # Create final results
         end_time = time.time()
         scan_duration = end_time - start_time
@@ -821,7 +955,9 @@ class GitHubIOCScanner:
             matches=all_matches,
             repositories_scanned=total_repos_scanned,
             files_scanned=total_files_scanned,
-            cache_stats=self.cache_manager.get_cache_stats() if self.cache_manager else None
+            cache_stats=self.cache_manager.get_cache_stats() if self.cache_manager else None,
+            workflow_findings=all_workflow_findings if all_workflow_findings else None,
+            secret_findings=all_secret_findings if all_secret_findings else None
         )
 
     def _scan_sequential(self) -> ScanResults:
@@ -923,6 +1059,8 @@ class GitHubIOCScanner:
             
             # Scan repositories for IOCs
             all_matches = []
+            all_workflow_findings = []
+            all_secret_findings = []
             total_files_scanned = 0
             successful_repos = 0
             failed_repos = 0
@@ -940,6 +1078,30 @@ class GitHubIOCScanner:
                     all_matches.extend(repo_matches)
                     total_files_scanned += files_scanned
                     successful_repos += 1
+                    
+                    # Scan workflows if enabled
+                    if self.config.scan_workflows and self.workflow_scanner:
+                        logger.info(f"[WORKFLOW] Scanning workflows in {repo.full_name}...")
+                        workflow_findings = self._scan_workflows(repo)
+                        all_workflow_findings.extend(workflow_findings)
+                        if workflow_findings:
+                            logger.info(f"[WORKFLOW] Found {len(workflow_findings)} workflow security issues in {repo.full_name}")
+                        else:
+                            logger.info(f"[WORKFLOW] No workflow issues found in {repo.full_name}")
+                    else:
+                        logger.debug(f"[WORKFLOW] Skipping workflow scan for {repo.full_name} (scan_workflows={self.config.scan_workflows}, scanner={self.workflow_scanner is not None})")
+                    
+                    # Scan for secrets if enabled
+                    if self.config.scan_secrets and self.secrets_scanner:
+                        logger.info(f"[SECRETS] Scanning secrets in {repo.full_name}...")
+                        secret_findings = self._scan_secrets(repo)
+                        all_secret_findings.extend(secret_findings)
+                        if secret_findings:
+                            logger.info(f"[SECRETS] Found {len(secret_findings)} secrets in {repo.full_name}")
+                        else:
+                            logger.info(f"[SECRETS] No secrets found in {repo.full_name}")
+                    else:
+                        logger.debug(f"[SECRETS] Skipping secrets scan for {repo.full_name} (scan_secrets={self.config.scan_secrets}, scanner={self.secrets_scanner is not None})")
                     
                     # Update scan state if available
                     if self.current_scan_state and self.scan_state_manager:
@@ -988,11 +1150,21 @@ class GitHubIOCScanner:
             else:
                 logger.info(f"Scan completed successfully: {len(all_matches)} total matches found across {total_files_scanned} files")
             
+            # Log workflow findings summary
+            if all_workflow_findings:
+                logger.info(f"Found {len(all_workflow_findings)} workflow security issues across all repositories")
+            
+            # Log secret findings summary
+            if all_secret_findings:
+                logger.info(f"Found {len(all_secret_findings)} secrets across all repositories")
+            
             return ScanResults(
                 matches=all_matches,
                 cache_stats=self.cache_manager.get_cache_stats(),
                 repositories_scanned=successful_repos,
-                files_scanned=total_files_scanned
+                files_scanned=total_files_scanned,
+                workflow_findings=all_workflow_findings if all_workflow_findings else None,
+                secret_findings=all_secret_findings if all_secret_findings else None
             )
             
         except (AuthenticationError, IOCLoaderError, ConfigurationError, ScanError):
@@ -1016,32 +1188,46 @@ class GitHubIOCScanner:
             raise ConfigurationError("Issues directory path cannot be empty")
 
     def discover_organization_repositories(self, org: str) -> List[Repository]:
-        """Discover all repositories in an organization with caching."""
+        """Discover all repositories in an organization with incremental caching.
+        
+        Uses smart incremental fetching:
+        - If cache exists, only fetches repos pushed since last cache update
+        - Merges new repos with cached repos for complete list
+        - Much faster for subsequent scans (only 1-2 API calls vs 10+ for large orgs)
+        """
         logger.info(f"Discovering repositories for organization: {org}")
         
         # Check cache first
-        cached_data = self.cache_manager.get_repository_metadata(org)
-        etag = None
+        use_cache = getattr(self.config, 'use_repo_cache', True)
+        cached_data = self.cache_manager.get_repository_metadata(org, team="")
+        
+        cached_repos = None
+        cache_timestamp = None
         
         if cached_data:
-            repositories, etag = cached_data
-            logger.debug(f"Found {len(repositories)} cached repositories for {org}")
+            cached_repos, _, cache_timestamp = cached_data
+            logger.info(f"📦 Found {len(cached_repos)} cached repositories (cached at {cache_timestamp})")
         
-        # Make API request with ETag for conditional request
-        response = self.github_client.get_organization_repos(
+        # If use_cache is False (--refresh-repos), do a full fetch
+        if not use_cache:
+            cached_repos = None
+            cache_timestamp = None
+            if not self.config.quiet:
+                print(f"   🔄 Refreshing repository list (ignoring cache)...")
+        
+        # Use GraphQL API with incremental fetching
+        # If we have cached repos, only fetch repos pushed since cache_timestamp
+        response = self.github_client.get_organization_repos_graphql(
             org, 
             include_archived=self.config.include_archived,
-            etag=etag
+            cached_repos=cached_repos,
+            cache_cutoff=cache_timestamp
         )
         
-        if response.not_modified and cached_data:
-            # Use cached data
-            repositories, _ = cached_data
-            logger.debug(f"Repository list for {org} not modified, using cache")
-        elif response.data:
-            # Update cache with new data
+        if response.data:
             repositories = response.data
-            self.cache_manager.store_repository_metadata(org, repositories, response.etag)
+            # Cache the results for future use
+            self.cache_manager.store_repository_metadata(org, repositories, response.etag, team="")
             logger.info(f"Discovered {len(repositories)} repositories for {org}")
         else:
             logger.info(f"No repositories found for organization {org}")
@@ -2367,3 +2553,232 @@ class GitHubIOCScanner:
         except Exception as e:
             logger.warning(f"Failed to fetch API SBOM content for {repo.full_name}: {e}")
             return None
+    
+    def _scan_workflows(self, repo: Repository) -> List[WorkflowFinding]:
+        """Scan GitHub Actions workflows in a repository for security issues.
+        
+        Args:
+            repo: Repository to scan
+            
+        Returns:
+            List of WorkflowFinding objects for detected security issues
+        """
+        if not self.workflow_scanner:
+            return []
+        
+        findings: List[WorkflowFinding] = []
+        
+        try:
+            # Discover workflow files in .github/workflows/
+            workflow_files = self._discover_workflow_files(repo)
+            
+            if not workflow_files:
+                logger.debug(f"No workflow files found in {repo.full_name}")
+                return []
+            
+            logger.debug(f"Found {len(workflow_files)} workflow files in {repo.full_name}")
+            
+            for file_path in workflow_files:
+                try:
+                    # Fetch workflow file content
+                    file_content = self.fetch_file_content_with_cache(repo, file_path)
+                    
+                    if not file_content:
+                        logger.debug(f"Could not fetch workflow content for {repo.full_name}/{file_path}")
+                        continue
+                    
+                    # Scan the workflow file
+                    file_findings = self.workflow_scanner.scan_workflow_file(
+                        repo.full_name, file_path, file_content.content
+                    )
+                    findings.extend(file_findings)
+                    
+                    if file_findings:
+                        logger.info(f"Found {len(file_findings)} workflow security issues in {repo.full_name}/{file_path}")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to scan workflow {repo.full_name}/{file_path}: {e}")
+                    continue
+            
+            return findings
+            
+        except Exception as e:
+            logger.warning(f"Failed to scan workflows in {repo.full_name}: {e}")
+            return []
+    
+    def _discover_workflow_files(self, repo: Repository) -> List[str]:
+        """Discover GitHub Actions workflow files in a repository.
+        
+        Args:
+            repo: Repository to search
+            
+        Returns:
+            List of workflow file paths
+        """
+        try:
+            # Get the repository tree and filter for workflow files
+            tree_response = self.github_client.get_tree(repo)
+            if not tree_response.data:
+                logger.debug(f"No tree data available for {repo.full_name}")
+                return []
+            
+            logger.debug(f"Repository {repo.full_name} has {len(tree_response.data)} files in tree")
+            
+            workflow_files = []
+            for file_info in tree_response.data:
+                file_path = file_info.path
+                # Check if file is in .github/workflows/ and is a YAML file
+                if self.workflow_scanner.is_workflow_file(file_path):
+                    workflow_files.append(file_path)
+                    logger.debug(f"Found workflow file: {file_path}")
+            
+            if workflow_files:
+                logger.info(f"Discovered {len(workflow_files)} workflow files in {repo.full_name}")
+            
+            return workflow_files
+            
+        except Exception as e:
+            logger.warning(f"Failed to discover workflow files in {repo.full_name}: {e}")
+            return []
+    
+    def _scan_secrets(self, repo: Repository) -> List[SecretFinding]:
+        """Scan repository for Shai-Hulud exfiltration artifacts.
+        
+        This is an optimized scan that focuses on detecting Shai-Hulud attack
+        artifacts (cloud.json, environment.json, etc.) rather than scanning
+        all files for secrets. This makes the scan much faster while still
+        detecting the most critical supply chain attack indicators.
+        
+        Args:
+            repo: Repository to scan
+            
+        Returns:
+            List of SecretFinding objects for detected Shai-Hulud artifacts
+        """
+        if not self.secrets_scanner:
+            return []
+        
+        findings: List[SecretFinding] = []
+        
+        try:
+            # Get the repository tree
+            tree_response = self.github_client.get_tree(repo)
+            if not tree_response.data:
+                logger.debug(f"No tree data available for secrets scan in {repo.full_name}")
+                return []
+            
+            # Only scan for Shai-Hulud artifact files (fast scan)
+            shai_hulud_files = []
+            for file_info in tree_response.data:
+                # Skip directories
+                if not hasattr(file_info, 'size') or file_info.size is None:
+                    continue
+                
+                # Check if file is a Shai-Hulud artifact
+                if self.secrets_scanner.is_shai_hulud_artifact(file_info.path):
+                    shai_hulud_files.append(file_info)
+            
+            if not shai_hulud_files:
+                logger.debug(f"No Shai-Hulud artifacts found in {repo.full_name}")
+                return []
+            
+            logger.warning(f"⚠️ Found {len(shai_hulud_files)} potential Shai-Hulud artifacts in {repo.full_name}")
+            
+            for file_info in shai_hulud_files:
+                try:
+                    # Report the artifact without fetching content (the presence is enough)
+                    file_findings = self.secrets_scanner._check_shai_hulud_artifacts(
+                        repo.full_name, file_info.path
+                    )
+                    findings.extend(file_findings)
+                    
+                    if file_findings:
+                        logger.warning(f"🚨 Shai-Hulud artifact detected: {repo.full_name}/{file_info.path}")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to check artifact {repo.full_name}/{file_info.path}: {e}")
+                    continue
+            
+            return findings
+            
+        except Exception as e:
+            logger.warning(f"Failed to scan for Shai-Hulud artifacts in {repo.full_name}: {e}")
+            return []
+
+    def _scan_workflows_and_secrets_parallel(
+        self, 
+        repos: List[Repository],
+        scan_workflows: bool = True,
+        scan_secrets: bool = True,
+        max_workers: int = 5
+    ) -> tuple[List[WorkflowFinding], List[SecretFinding]]:
+        """Scan workflows and secrets across multiple repositories in parallel.
+        
+        Uses ThreadPoolExecutor for parallel processing to speed up scanning.
+        
+        Args:
+            repos: List of repositories to scan
+            scan_workflows: Whether to scan for workflow security issues
+            scan_secrets: Whether to scan for secrets
+            max_workers: Maximum number of parallel workers
+            
+        Returns:
+            Tuple of (workflow_findings, secret_findings)
+        """
+        import concurrent.futures
+        
+        all_workflow_findings: List[WorkflowFinding] = []
+        all_secret_findings: List[SecretFinding] = []
+        
+        if not repos or (not scan_workflows and not scan_secrets):
+            return all_workflow_findings, all_secret_findings
+        
+        def scan_repo(repo: Repository) -> tuple[List[WorkflowFinding], List[SecretFinding]]:
+            """Scan a single repository for workflows and secrets."""
+            workflow_findings = []
+            secret_findings = []
+            
+            try:
+                if scan_workflows and self.workflow_scanner:
+                    workflow_findings = self._scan_workflows(repo)
+                    
+                if scan_secrets and self.secrets_scanner:
+                    secret_findings = self._scan_secrets(repo)
+            except Exception as e:
+                logger.warning(f"Error scanning {repo.full_name}: {e}")
+            
+            return workflow_findings, secret_findings
+        
+        # Use ThreadPoolExecutor for parallel scanning
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_repo = {
+                executor.submit(scan_repo, repo): repo 
+                for repo in repos
+            }
+            
+            # Process results as they complete
+            completed = 0
+            total = len(repos)
+            
+            for future in concurrent.futures.as_completed(future_to_repo):
+                repo = future_to_repo[future]
+                completed += 1
+                
+                if not self.config.quiet:
+                    print(f"\r     [{completed:3d}/{total:3d}] {repo.full_name[:50]:<50}", end='', flush=True)
+                
+                try:
+                    workflow_findings, secret_findings = future.result()
+                    all_workflow_findings.extend(workflow_findings)
+                    all_secret_findings.extend(secret_findings)
+                    
+                    if workflow_findings:
+                        logger.info(f"Found {len(workflow_findings)} workflow issues in {repo.full_name}")
+                    if secret_findings:
+                        logger.info(f"Found {len(secret_findings)} secrets in {repo.full_name}")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to get results for {repo.full_name}: {e}")
+        
+        return all_workflow_findings, all_secret_findings

@@ -19,6 +19,7 @@ This directory contains comprehensive documentation for the GitHub IOC Scanner.
 ### Batch Processing
 - [**Batch Processing Tutorial**](BATCH_PROCESSING_TUTORIAL.md) - Complete batch processing guide
 - [**Batch API Reference**](BATCH_API_REFERENCE.md) - API documentation
+- [**Batch API Documentation**](BATCH_API_DOCUMENTATION.md) - Internal API docs
 - [**Batch Configuration Guide**](BATCH_CONFIGURATION_GUIDE.md) - Configuration options
 - [**Batch Troubleshooting**](BATCH_TROUBLESHOOTING_GUIDE.md) - Common batch issues
 
@@ -28,6 +29,7 @@ This directory contains comprehensive documentation for the GitHub IOC Scanner.
 ### Error Handling & Resilience
 - [**Complete Error Handling Solution**](COMPLETE_ERROR_HANDLING_SOLUTION.md) - Comprehensive error handling
 - [**Rate Limit Improvements**](RATE_LIMIT_IMPROVEMENTS.md) - Rate limiting optimizations
+- [**Rate Limit Logging**](RATE_LIMIT_LOGGING_IMPROVEMENT.md) - Rate limit monitoring
 
 ### Resume & State Management
 - [**Resume Functionality**](RESUME_FUNCTIONALITY_COMPLETE.md) - Scan resumption features
@@ -39,37 +41,20 @@ This directory contains comprehensive documentation for the GitHub IOC Scanner.
 - [**S1ngularity IOC Summary**](S1NGULARITY_IOC_SUMMARY.md) - Current IOC coverage
 - [**CrowdStrike Typosquatting Attack**](CROWDSTRIKE_TYPOSQUATTING_ATTACK_SUMMARY.md) - Attack analysis
 
-### Security Features
-- [**Security Analyst Output**](SECURITY_ANALYST_OUTPUT_SUMMARY.md) - Output formatting for analysts
-
-## 🔧 Implementation Details
-
-### System Architecture
-- [**Error Handling Summary**](ERROR_HANDLING_SUMMARY.md) - Error handling architecture
-- [**Cache Optimization**](CACHE_OPTIMIZATION_SUMMARY.md) - Caching strategies
-- [**Memory & Resource Management**](MEMORY_RESOURCE_MANAGEMENT_SUMMARY.md) - Resource optimization
-
-### Progress & Monitoring
-- [**Progress Tracking**](PROGRESS_TRACKING_SUMMARY.md) - Progress monitoring system
-- [**Rate Limit Logging**](RATE_LIMIT_LOGGING_IMPROVEMENT.md) - Rate limit monitoring
-
 ### Parser Improvements
 - [**Python Parser Improvements**](PYTHON_PARSER_IMPROVEMENTS.md) - Enhanced Python parsing
-
-## 🧪 Testing & Development
-
-### Testing Documentation
-- [**Integration Tests Summary**](INTEGRATION_TESTS_SUMMARY.md) - Test coverage and results
-- [**Batch Testing Summary**](BATCH_TESTING_SUMMARY.md) - Batch processing tests
-
-### Implementation Summaries
-- [**Batch Progress Implementation**](BATCH_PROGRESS_IMPLEMENTATION_SUMMARY.md) - Progress system details
-- [**Batch API Documentation**](BATCH_API_DOCUMENTATION.md) - Internal API docs
 
 ## 📋 Project Management
 
 ### Release & Development
 - [**Release Checklist**](RELEASE_CHECKLIST.md) - Release preparation checklist
+- [**Release Notes 1.5.0**](RELEASE_NOTES_1.5.0.md) - Version 1.5.0 release notes
+- [**Release Notes 1.4.1**](RELEASE_NOTES_1.4.1.md) - Version 1.4.1 release notes
+- [**Project Cleanup Report**](PROJECT_CLEANUP_REPORT.md) - Codebase analysis report
+
+## 📁 Archive
+
+Implementation summaries and development notes have been moved to the [archive](archive/) folder for historical reference.
 
 ---
 
@@ -81,10 +66,8 @@ This directory contains comprehensive documentation for the GitHub IOC Scanner.
 - See [TROUBLESHOOTING](TROUBLESHOOTING.md) for common issues
 
 **For Developers:**
-- Review [Error Handling Summary](ERROR_HANDLING_SUMMARY.md) for architecture
-- Check [Integration Tests](INTEGRATION_TESTS_SUMMARY.md) for test coverage
+- Review [Complete Error Handling Solution](COMPLETE_ERROR_HANDLING_SOLUTION.md) for architecture
 - Use [Release Checklist](RELEASE_CHECKLIST.md) for releases
 
 **For Security Analysts:**
 - Review [S1ngularity IOC Summary](S1NGULARITY_IOC_SUMMARY.md) for threat coverage
-- Check [Security Analyst Output](SECURITY_ANALYST_OUTPUT_SUMMARY.md) for output formats

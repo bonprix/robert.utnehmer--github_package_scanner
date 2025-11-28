@@ -1,0 +1,10 @@
+# Malformed YAML - missing closing bracket
+name: Broken Workflow
+
+on:
+  push:
+    branches: [main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest

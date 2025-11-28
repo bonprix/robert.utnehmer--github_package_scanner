@@ -8,13 +8,15 @@ A powerful command-line tool for scanning GitHub repositories to detect Indicato
 
 ## 🚀 Features
 
-- **Multi-Language Support**: JavaScript/Node.js, Python, Ruby, PHP, Go, Rust
+- **Multi-Language Support**: JavaScript/Node.js, Python, Ruby, PHP, Go, Rust, Java/Maven
 - **SBOM Integration**: Native support for Software Bill of Materials (SPDX, CycloneDX formats)
+- **GitHub Actions Security**: Detect dangerous workflow configurations and malicious runners
+- **Secrets Detection**: Identify exfiltrated credentials and API keys in repositories
 - **Flexible Scanning**: Organization-wide, team-specific, team-first organization, or individual repository scanning
 - **High Performance**: Parallel processing with intelligent batching and caching
 - **Real-time Progress**: Live progress tracking with ETA calculations
 - **Supply Chain Security**: Detect compromised packages and typosquatting attacks
-- **Comprehensive IOCs**: Pre-loaded with 2138+ known malicious packages including recent npm attacks
+- **Comprehensive IOCs**: Pre-loaded with 2932+ known malicious packages including recent npm attacks
 
 ## 📦 Supported Package Managers & SBOM Formats
 
@@ -26,6 +28,7 @@ A powerful command-line tool for scanning GitHub repositories to detect Indicato
 | **PHP** | composer | `composer.lock` |
 | **Go** | go modules | `go.mod`, `go.sum` |
 | **Rust** | cargo | `Cargo.lock` |
+| **Java** | Maven | `pom.xml` |
 
 ### SBOM (Software Bill of Materials) Support
 
@@ -207,6 +210,24 @@ github-ioc-scan --org your-org --disable-sbom
 - CycloneDX (JSON/XML): `cyclonedx.json`, `bom.xml`
 - Generic formats: `sbom.json`, `software-bill-of-materials.json`
 
+### Security Scanning
+
+Enable advanced security scanning features:
+
+```bash
+# Enable GitHub Actions workflow security scanning
+github-ioc-scan --org your-org --scan-workflows
+
+# Enable secrets detection (AWS keys, GitHub tokens, API keys)
+github-ioc-scan --org your-org --scan-secrets
+
+# Enable both workflow and secrets scanning
+github-ioc-scan --org your-org --scan-workflows --scan-secrets
+
+# Comprehensive security scan with all features
+github-ioc-scan --org your-org --scan-workflows --scan-secrets --enable-maven
+```
+
 ### Batch Processing
 
 For large organizations, use batch processing for optimal performance:
@@ -253,10 +274,10 @@ The scanner includes comprehensive IOC definitions for:
 - **Backdoored Libraries**: Libraries with hidden malicious functionality
 
 ### Total Coverage
-- **2138+ IOC Definitions**: Comprehensive coverage of known malicious packages
+- **2857+ IOC Definitions**: Comprehensive coverage of known malicious packages (2833 npm + 24 Maven)
 - **Regular Updates**: IOC definitions are continuously updated with new threats
-- **Multi-language**: Coverage across all supported package managers
-- **Current as of September 2025**: Includes latest npm supply chain attacks reported by Heise Security
+- **Multi-language**: Coverage across all supported package managers including Java/Maven
+- **Current as of November 2025**: Includes latest npm and Maven supply chain attacks
 
 ## 📊 Output Formats
 
@@ -337,17 +358,106 @@ cache:
 - **Detailed metrics**: Success rates, processing speeds
 - **Performance monitoring**: Automatic performance optimization
 
+### New Features Performance Impact
+
+The new security scanning features (Maven, Workflow, Secrets) add minimal overhead:
+
+| Feature | Typical Time | Impact |
+|---------|--------------|--------|
+| Maven Parser | ~0.1-0.5ms per file | Negligible |
+| Workflow Scanner | ~0.3-1ms per file | Negligible |
+| Secrets Scanner | ~2-5ms per 1000 lines | Low |
+| **Combined Overhead** | ~20-30% | Minimal vs network latency |
+
+All features scale linearly and are optimized for large repositories. See [Performance Documentation](docs/PERFORMANCE.md) for detailed benchmarks.
+
+### Parallel Scanning (v1.7.0+)
+
+Workflow and secrets scanning now runs in parallel for significantly faster scans:
+
+| Repositories | Workers | Speed Improvement |
+|--------------|---------|-------------------|
+| 16 repos | 5 workers | ~3x faster |
+| 50 repos | 10 workers | ~5x faster |
+| 100+ repos | 10 workers | ~5-8x faster |
+
+### Incremental Repository Caching (v1.7.0+)
+
+Repository lists are now cached and incrementally updated:
+
+| Scenario | API Calls | Time Saved |
+|----------|-----------|------------|
+| First scan (1000 repos) | 10 calls | Baseline |
+| Repeat scan (5 new repos) | 1 call | ~90% |
+| Repeat scan (no changes) | 1 call | ~95% |
+
+Use `--refresh-repos` to force a full refresh when needed.
+
 ## 🛡️ Security Features
 
 ### Supply Chain Protection
-- **Comprehensive IOC database**: 2138+ known malicious packages (including Heise-reported npm attacks)
+- **Comprehensive IOC database**: 2932+ known malicious packages (including Heise-reported npm attacks)
 - **Typosquatting detection**: Advanced pattern matching
 - **Dependency analysis**: Deep dependency tree scanning
+
+### GitHub Actions Security Scanning
+Detect dangerous workflow configurations that could be exploited in supply chain attacks:
+
+- **Dangerous Triggers**: Detection of `pull_request_target` with unsafe checkout configurations
+- **Privilege Escalation**: Identification of `workflow_run` triggers that could enable privilege escalation
+- **Malicious Runners**: Detection of known malicious self-hosted runners (e.g., SHA1HULUD)
+- **Shai Hulud 2 Patterns**: Detection of attack-specific workflow files (`discussion.yaml`, `formatter_123456789.yml`)
+
+```bash
+# Enable workflow scanning
+github-ioc-scan --org your-org --scan-workflows
+
+# Disable workflow scanning (default)
+github-ioc-scan --org your-org --no-scan-workflows
+```
+
+See [Workflow Scanning Documentation](docs/WORKFLOW_SCANNING.md) for details.
+
+### Secrets Detection
+Identify exfiltrated credentials and sensitive data in repositories:
+
+- **AWS Credentials**: Access keys (AKIA...) and secret keys
+- **GitHub Tokens**: Personal access tokens (ghp_), OAuth tokens (gho_), app tokens (ghs_)
+- **API Keys**: Generic API key patterns and service-specific tokens
+- **Private Keys**: RSA, EC, and OpenSSH private keys
+- **Shai Hulud 2 Artifacts**: Detection of exfiltration files (cloud.json, environment.json, truffleSecrets.json)
+
+```bash
+# Enable secrets scanning
+github-ioc-scan --org your-org --scan-secrets
+
+# Disable secrets scanning (default)
+github-ioc-scan --org your-org --no-scan-secrets
+```
+
+See [Secrets Detection Documentation](docs/SECRETS_DETECTION.md) for details.
+
+### Maven/Java Scanning
+Scan Maven `pom.xml` files for compromised Java dependencies:
+
+```bash
+# Maven scanning is enabled by default
+github-ioc-scan --org your-org
+
+# Disable Maven scanning
+github-ioc-scan --org your-org --disable-maven
+
+# Explicitly enable Maven scanning
+github-ioc-scan --org your-org --enable-maven
+```
+
+See [Maven Support Documentation](docs/MAVEN_SUPPORT.md) for details.
 
 ### Privacy & Security
 - **Local processing**: All analysis done locally
 - **Secure API usage**: Proper token handling
 - **No data collection**: No telemetry or data sharing
+- **Secret Masking**: Detected secrets are always masked in output (first 4 chars + ***)
 
 ## 📚 Documentation
 
@@ -356,6 +466,9 @@ Comprehensive documentation is available in the `docs/` directory:
 - [**Batch Processing Guide**](docs/BATCH_PROCESSING_TUTORIAL.md) - Advanced batch processing features
 - [**Performance Optimization**](docs/PERFORMANCE.md) - Performance tuning and optimization
 - [**Package Manager Support**](docs/PACKAGE_MANAGERS.md) - Detailed package manager information
+- [**Maven Support**](docs/MAVEN_SUPPORT.md) - Maven/Java dependency scanning
+- [**Workflow Scanning**](docs/WORKFLOW_SCANNING.md) - GitHub Actions security scanning
+- [**Secrets Detection**](docs/SECRETS_DETECTION.md) - Credential and secret detection
 - [**IOC Definitions**](docs/S1NGULARITY_IOC_SUMMARY.md) - Current IOC coverage and sources
 - [**API Reference**](docs/BATCH_API_REFERENCE.md) - Complete API documentation
 

@@ -40,6 +40,13 @@ from .intelligent_rate_limiter import IntelligentRateLimiter, RateLimitStrategy
 logger = get_logger(__name__)
 
 
+def _format_reset_time(reset_time: int) -> str:
+    """Format rate limit reset time safely, handling invalid timestamps."""
+    if reset_time and reset_time > 0:
+        return f"Resets at {datetime.fromtimestamp(reset_time)}"
+    return "reset time unknown"
+
+
 class AsyncGitHubClient:
     """Async client for interacting with the GitHub API with batch processing capabilities."""
 
@@ -993,7 +1000,7 @@ class AsyncGitHubClient:
                     if "rate limit exceeded" in error_text:
                         reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
                         raise RateLimitError(
-                            f"GitHub API rate limit exceeded. Resets at {datetime.fromtimestamp(reset_time)}",
+                            f"GitHub API rate limit exceeded. {_format_reset_time(reset_time)}",
                             reset_time=reset_time
                         )
                     elif "forbidden" in error_text:

@@ -22,25 +22,20 @@ Welcome to the comprehensive documentation for the GitHub IOC Scanner. This dire
 ### Security Intelligence
 - [**CrowdStrike Attack**](CROWDSTRIKE_TYPOSQUATTING_ATTACK_SUMMARY.md) - CrowdStrike typosquatting campaign details
 - [**S1ngularity Attack**](S1NGULARITY_IOC_SUMMARY.md) - S1ngularity/NX attack analysis
-- [**Security Analysis**](SECURITY_ANALYST_OUTPUT_SUMMARY.md) - Security analyst insights
 
 ### Development
 - [**Contributing**](../CONTRIBUTING.md) - How to contribute to the project
-- [**Testing Guide**](BATCH_TESTING_SUMMARY.md) - Testing framework and guidelines
 - [**Examples**](EXAMPLES.md) - Code examples and use cases
 
 ### Technical Deep Dives
-- [**Cache Optimization**](CACHE_OPTIMIZATION_SUMMARY.md) - Caching strategies and optimization
-- [**Memory Management**](MEMORY_RESOURCE_MANAGEMENT_SUMMARY.md) - Memory-efficient processing
-- [**Progress Tracking**](PROGRESS_TRACKING_SUMMARY.md) - Real-time progress monitoring
 - [**Rate Limit Management**](RATE_LIMIT_LOGGING_IMPROVEMENT.md) - GitHub API rate limit handling
+- [**Error Handling**](COMPLETE_ERROR_HANDLING_SOLUTION.md) - Comprehensive error handling
 
 ## 🎯 Quick Navigation
 
 ### For Security Teams
 - [IOC Coverage](S1NGULARITY_IOC_SUMMARY.md) - What threats are detected
 - [CrowdStrike Campaign](CROWDSTRIKE_TYPOSQUATTING_ATTACK_SUMMARY.md) - Recent typosquatting attack
-- [Security Analysis](SECURITY_ANALYST_OUTPUT_SUMMARY.md) - Threat intelligence insights
 
 ### For DevOps Teams
 - [Batch Processing](BATCH_PROCESSING_TUTORIAL.md) - Efficient large-scale scanning
@@ -54,8 +49,8 @@ Welcome to the comprehensive documentation for the GitHub IOC Scanner. This dire
 
 ### For System Administrators
 - [Installation](../README.md#installation) - Setup and deployment
-- [Cache Management](CACHE_OPTIMIZATION_SUMMARY.md) - Storage and performance
-- [Memory Management](MEMORY_RESOURCE_MANAGEMENT_SUMMARY.md) - Resource optimization
+- [Performance Guide](PERFORMANCE.md) - Performance optimization
+- [Troubleshooting](TROUBLESHOOTING.md) - Common issues and solutions
 
 ## 🔍 Search and Navigation Tips
 
@@ -87,8 +82,7 @@ Welcome to the comprehensive documentation for the GitHub IOC Scanner. This dire
 ### Security Analysts
 1. Review [IOC Coverage](S1NGULARITY_IOC_SUMMARY.md) for current threats
 2. Study [CrowdStrike Campaign](CROWDSTRIKE_TYPOSQUATTING_ATTACK_SUMMARY.md) details
-3. Read [Security Analysis](SECURITY_ANALYST_OUTPUT_SUMMARY.md) for insights
-4. Check [Examples](EXAMPLES.md) for analysis workflows
+3. Check [Examples](EXAMPLES.md) for analysis workflows
 
 ## 🆕 What's New
 

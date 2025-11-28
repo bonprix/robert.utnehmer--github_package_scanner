@@ -147,7 +147,7 @@ class TestPerformanceScenarios:
         github_client = Mock(spec=GitHubClient)
         
         # Mock GitHub API responses
-        github_client.get_organization_repos.return_value = APIResponse(
+        github_client.get_organization_repos_graphql.return_value = APIResponse(
             data=mock_repos,
             etag='"large-org-etag"'
         )
@@ -207,7 +207,7 @@ class TestPerformanceScenarios:
         ioc_loader1 = IOCLoader(issues_dir=temp_issues_dir)
         github_client1 = Mock(spec=GitHubClient)
         
-        github_client1.get_organization_repos.return_value = APIResponse(
+        github_client1.get_organization_repos_graphql.return_value = APIResponse(
             data=mock_repos,
             etag='"org-etag"'
         )
@@ -237,7 +237,7 @@ class TestPerformanceScenarios:
         github_client2 = Mock(spec=GitHubClient)
         
         # Return 304 Not Modified for cached content
-        github_client2.get_organization_repos.return_value = APIResponse(
+        github_client2.get_organization_repos_graphql.return_value = APIResponse(
             data=None,
             etag='"org-etag"',
             not_modified=True
@@ -358,7 +358,7 @@ class TestPerformanceScenarios:
                 )
             return APIResponse(data=None, etag=None)
         
-        github_client.get_organization_repos.return_value = APIResponse(
+        github_client.get_organization_repos_graphql.return_value = APIResponse(
             data=mock_repos,
             etag='"org-etag"'
         )
@@ -406,7 +406,7 @@ class TestPerformanceScenarios:
         ioc_loader = IOCLoader(issues_dir=temp_issues_dir)
         github_client = Mock(spec=GitHubClient)
         
-        github_client.get_organization_repos.return_value = APIResponse(
+        github_client.get_organization_repos_graphql.return_value = APIResponse(
             data=mock_repos,
             etag='"memory-org-etag"'
         )
@@ -485,7 +485,7 @@ class TestPerformanceScenarios:
         ioc_loader1 = IOCLoader(issues_dir=temp_issues_dir)
         github_client1 = Mock(spec=GitHubClient)
         
-        github_client1.get_organization_repos.return_value = APIResponse(data=mock_repos, etag='"org-etag"')
+        github_client1.get_organization_repos_graphql.return_value = APIResponse(data=mock_repos, etag='"org-etag"')
         github_client1.search_files.side_effect = lambda repo, patterns, fast_mode=False: normal_files.get(repo.full_name, [])
         github_client1.get_file_content.return_value = APIResponse(
             data=FileContent(content='{"dependencies": {}}', sha="mock", size=1024),
@@ -503,7 +503,7 @@ class TestPerformanceScenarios:
         ioc_loader2 = IOCLoader(issues_dir=temp_issues_dir)
         github_client2 = Mock(spec=GitHubClient)
         
-        github_client2.get_organization_repos.return_value = APIResponse(data=mock_repos, etag='"org-etag"')
+        github_client2.get_organization_repos_graphql.return_value = APIResponse(data=mock_repos, etag='"org-etag"')
         github_client2.search_files.side_effect = lambda repo, patterns, fast_mode=True: fast_files.get(repo.full_name, [])
         github_client2.get_file_content.return_value = APIResponse(
             data=FileContent(content='{"dependencies": {}}', sha="mock", size=1024),

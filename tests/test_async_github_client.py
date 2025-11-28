@@ -9,7 +9,7 @@ import pytest
 import httpx
 
 from src.github_ioc_scanner.async_github_client import AsyncGitHubClient
-from src.github_ioc_scanner.batch_models import BatchRequest, BatchConfig, AsyncBatchContext
+from src.github_ioc_scanner.batch_models import BatchRequest, BatchConfig, AsyncBatchContext, BatchResult
 from src.github_ioc_scanner.models import Repository, FileContent, APIResponse
 from src.github_ioc_scanner.exceptions import AuthenticationError, NetworkError
 
@@ -217,10 +217,9 @@ class TestAsyncGitHubClient:
                     assert "package.json" in result
                     assert "README.md" not in result
                     
-                    # Verify blob was called for successful file once, and failed file with retries
-                    # 1 call for package.json + (retry_attempts + 1) calls for README.md
-                    expected_calls = 1 + (client.config.retry_attempts + 1)
-                    assert mock_blob.call_count == expected_calls
+                    # Verify blob was called for each file (no retry in _fetch_blob_with_semaphore)
+                    # 1 call for package.json + 1 call for README.md
+                    assert mock_blob.call_count == 2
     
     @pytest.mark.asyncio
     async def test_get_multiple_file_contents_parallel_empty_input(self, client, mock_repo):
@@ -232,43 +231,31 @@ class TestAsyncGitHubClient:
         assert result == {}
     
     @pytest.mark.asyncio
-    async def test_fetch_blob_with_semaphore_retry_logic(self, client, mock_repo):
-        """Test blob fetching with retry logic."""
-        from src.github_ioc_scanner.exceptions import RateLimitError
+    async def test_fetch_blob_with_semaphore_success(self, client, mock_repo):
+        """Test blob fetching with semaphore - successful case."""
         from src.github_ioc_scanner.models import FileInfo
         
         file_info = FileInfo(path="test.json", sha="abc123", size=100)
         semaphore = asyncio.Semaphore(1)
         
-        # Mock rate limit error on first call, success on second
-        call_count = 0
-        async def mock_blob_side_effect(repo, sha):
-            nonlocal call_count
-            call_count += 1
-            if call_count == 1:
-                raise RateLimitError("Rate limit exceeded", reset_time=1234567890)
-            return '{"test": "content"}'
-        
         with patch.object(client, 'get_blob_content_async', new_callable=AsyncMock) as mock_blob:
-            mock_blob.side_effect = mock_blob_side_effect
+            mock_blob.return_value = '{"test": "content"}'
             
-            # Mock sleep to avoid actual delays in tests
-            with patch('asyncio.sleep', new_callable=AsyncMock):
-                result = await client._fetch_blob_with_semaphore(
-                    semaphore, mock_repo, "test.json", file_info
-                )
-                
-                assert result is not None
-                file_path, file_content = result
-                assert file_path == "test.json"
-                assert file_content.content == '{"test": "content"}'
-                
-                # Verify retry happened
-                assert mock_blob.call_count == 2
+            result = await client._fetch_blob_with_semaphore(
+                semaphore, mock_repo, "test.json", file_info
+            )
+            
+            assert result is not None
+            file_path, file_content = result
+            assert file_path == "test.json"
+            assert file_content.content == '{"test": "content"}'
+            
+            # Verify blob was called once
+            assert mock_blob.call_count == 1
     
     @pytest.mark.asyncio
-    async def test_fetch_blob_with_semaphore_max_retries_exceeded(self, client, mock_repo):
-        """Test blob fetching when max retries are exceeded."""
+    async def test_fetch_blob_with_semaphore_rate_limit_error(self, client, mock_repo):
+        """Test blob fetching when rate limit error occurs - error is re-raised."""
         from src.github_ioc_scanner.exceptions import RateLimitError
         from src.github_ioc_scanner.models import FileInfo
         
@@ -282,16 +269,14 @@ class TestAsyncGitHubClient:
         with patch.object(client, 'get_blob_content_async', new_callable=AsyncMock) as mock_blob:
             mock_blob.side_effect = mock_blob_side_effect
             
-            # Mock sleep to avoid actual delays in tests
-            with patch('asyncio.sleep', new_callable=AsyncMock):
-                with pytest.raises(RateLimitError):
-                    await client._fetch_blob_with_semaphore(
-                        semaphore, mock_repo, "test.json", file_info
-                    )
-                
-                # Verify all retry attempts were made
-                expected_calls = client.config.retry_attempts + 1
-                assert mock_blob.call_count == expected_calls
+            # Rate limit errors are re-raised (no retry in _fetch_blob_with_semaphore)
+            with pytest.raises(RateLimitError):
+                await client._fetch_blob_with_semaphore(
+                    semaphore, mock_repo, "test.json", file_info
+                )
+            
+            # Verify only one call was made (no retry in this method)
+            assert mock_blob.call_count == 1
     
     @pytest.mark.asyncio
     async def test_process_batch_requests(self, client, mock_repo):
@@ -628,25 +613,24 @@ class TestAsyncGitHubClient:
     
     @pytest.mark.asyncio
     async def test_stream_large_file_content_large_file(self, client, mock_repo):
-        """Test streaming for large files."""
-        # Test that streaming is called for large files
+        """Test streaming for large files (above threshold)."""
+        # File size must be above stream_large_files_threshold (default 1MB)
+        # to trigger streaming behavior
         mock_file_data = {
-            "size": 2048,  # Large file (above threshold)
+            "size": 2 * 1024 * 1024,  # 2MB - above 1MB threshold
             "sha": "def456"
         }
         
         with patch.object(client, '_make_request', new_callable=AsyncMock) as mock_request:
             mock_request.return_value = APIResponse(data=mock_file_data)
             
-            with patch.object(client, '_stream_blob_content', new_callable=AsyncMock) as mock_stream:
-                # Mock streaming to return content in chunks
-                async def mock_stream_generator():
-                    yield "chunk1"
-                    yield "chunk2"
-                    yield "chunk3"
-                
-                mock_stream.return_value = mock_stream_generator()
-                
+            # Mock _stream_blob_content as an async generator
+            async def mock_stream_generator(repo, sha, chunk_size):
+                yield "chunk1"
+                yield "chunk2"
+                yield "chunk3"
+            
+            with patch.object(client, '_stream_blob_content', side_effect=mock_stream_generator) as mock_stream:
                 chunks = []
                 async for chunk in client.stream_large_file_content(mock_repo, "large.json", chunk_size=1024):
                     chunks.append(chunk)
@@ -655,58 +639,66 @@ class TestAsyncGitHubClient:
                 assert len(chunks) == 3
                 assert chunks == ["chunk1", "chunk2", "chunk3"]
                 
-                # Verify streaming was called with correct parameters
+                # Verify streaming was called
                 mock_stream.assert_called_once_with(mock_repo, "def456", 1024)
     
     @pytest.mark.asyncio
     async def test_get_file_content_chunked_small_file(self, client, mock_repo):
         """Test chunked file content retrieval for small files."""
+        # Mock file metadata response (small file below threshold)
+        mock_file_data = {
+            "size": 15,  # Small file
+            "sha": "abc123",
+            "content": base64.b64encode(b'{"name": "test"}').decode()
+        }
+        
         mock_file_content = FileContent(
             content='{"name": "test"}',
             sha="abc123",
             size=15
         )
         
-        with patch.object(client, 'get_file_content_async', new_callable=AsyncMock) as mock_get_file:
-            mock_get_file.return_value = APIResponse(data=mock_file_content)
+        with patch.object(client, '_make_request', new_callable=AsyncMock) as mock_request:
+            mock_request.return_value = APIResponse(data=mock_file_data)
             
-            result = await client.get_file_content_chunked(mock_repo, "small.json")
-            
-            assert result is not None
-            assert result.content == '{"name": "test"}'
-            assert result.size == 15
-            
-            # Should use regular method for small files
-            mock_get_file.assert_called_once()
+            with patch.object(client, 'get_file_content_async', new_callable=AsyncMock) as mock_get_file:
+                mock_get_file.return_value = APIResponse(data=mock_file_content)
+                
+                result = await client.get_file_content_chunked(mock_repo, "small.json")
+                
+                assert result is not None
+                assert result.content == '{"name": "test"}'
+                assert result.size == 15
+                
+                # Should use regular method for small files
+                mock_get_file.assert_called_once()
     
     @pytest.mark.asyncio
     async def test_get_file_content_chunked_large_file(self, client, mock_repo):
         """Test chunked file content retrieval for large files."""
         large_content = '{"name": "test", "data": "' + 'x' * 2000 + '"}'
         
-        # Mock file metadata response
+        # Mock file metadata response - must be above stream_large_files_threshold (1MB)
         mock_file_data = {
-            "size": 2048,  # Large file
+            "size": 2 * 1024 * 1024,  # 2MB - above threshold
             "sha": "def456"
         }
         
         with patch.object(client, '_make_request', new_callable=AsyncMock) as mock_request:
             mock_request.return_value = APIResponse(data=mock_file_data)
             
-            with patch.object(client, 'stream_large_file_content', new_callable=AsyncMock) as mock_stream:
-                # Mock streaming to return content in chunks
-                async def mock_stream_generator(repo, file_path, chunk_size=8192):
-                    content = large_content
-                    for i in range(0, len(content), chunk_size):
-                        yield content[i:i + chunk_size]
-                
-                mock_stream.return_value = mock_stream_generator(mock_repo, "large.json")
-                
+            # Mock streaming as an async generator
+            async def mock_stream_generator(repo, file_path, chunk_size=8192):
+                content = large_content
+                for i in range(0, len(content), chunk_size):
+                    yield content[i:i + chunk_size]
+            
+            with patch.object(client, 'stream_large_file_content', side_effect=mock_stream_generator) as mock_stream:
                 result = await client.get_file_content_chunked(mock_repo, "large.json")
                 
                 assert result is not None
                 assert result.content == large_content
-                assert result.size == 2048
+                assert result.size == 2 * 1024 * 1024
                 
                 # Should use streaming for large files
                 mock_stream.assert_called_once()
@@ -714,9 +706,9 @@ class TestAsyncGitHubClient:
     @pytest.mark.asyncio
     async def test_get_file_content_chunked_too_large(self, client, mock_repo):
         """Test chunked file content retrieval for files that are too large."""
-        # Mock very large file metadata
+        # Mock very large file metadata - larger than max_memory_usage_mb (500MB default)
         mock_file_data = {
-            "size": 100 * 1024 * 1024,  # 100MB - larger than default max
+            "size": 600 * 1024 * 1024,  # 600MB - larger than default max (500MB)
             "sha": "huge123"
         }
         

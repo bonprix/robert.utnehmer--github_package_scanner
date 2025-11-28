@@ -340,11 +340,15 @@ class CacheManager:
                 (repo, path, sha, ioc_hash, results_json, timestamp)
             )
     
-    def get_repository_metadata(self, org: str, team: str = "") -> Optional[Tuple[List[Repository], Optional[str]]]:
-        """Get cached repository metadata for organization or team."""
+    def get_repository_metadata(self, org: str, team: str = "") -> Optional[Tuple[List[Repository], Optional[str], Optional[datetime]]]:
+        """Get cached repository metadata for organization or team.
+        
+        Returns:
+            Tuple of (repositories, etag, cache_timestamp) or None if not cached
+        """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
-                "SELECT repos_json, etag FROM repo_metadata WHERE org = ? AND team = ?",
+                "SELECT repos_json, etag, timestamp FROM repo_metadata WHERE org = ? AND team = ?",
                 (org, team)
             )
             result = cursor.fetchone()
@@ -362,7 +366,9 @@ class CacheManager:
                     )
                     for repo in repos_data
                 ]
-                return repositories, result[1]
+                # Convert timestamp to datetime
+                cache_timestamp = datetime.fromtimestamp(result[2], tz=timezone.utc) if result[2] else None
+                return repositories, result[1], cache_timestamp
             else:
                 self._session_stats.misses += 1
                 return None

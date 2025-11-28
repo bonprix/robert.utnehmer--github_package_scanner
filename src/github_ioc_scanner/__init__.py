@@ -14,7 +14,9 @@ from .models import (
     ScanResults,
     FileContent,
     APIResponse,
+    WorkflowFinding,
 )
+from .workflow_scanner import WorkflowScanner
 from .batch_models import (
     BatchRequest,
     BatchResult,
@@ -44,6 +46,7 @@ __all__ = [
     "ScanResults",
     "FileContent",
     "APIResponse",
+    "WorkflowFinding",
     # Batch processing models
     "BatchRequest",
     "BatchResult",
@@ -57,4 +60,6 @@ __all__ = [
     "CrossRepoBatch",
     # Async client
     "AsyncGitHubClient",
+    # Workflow scanning
+    "WorkflowScanner",
 ]

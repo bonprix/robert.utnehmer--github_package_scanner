@@ -179,5 +179,13 @@ IOC_PACKAGES = {
     "ts-gaussian": {"3.0.6"},
     "ve-bamreader": {"0.2.6"},
     "ve-editor": {"1.0.1"},
+    
+    # -------------------
+    # Maven packages (Shai-Hulud v2 - November 2025)
+    # Source: https://thehackernews.com/2025/11/shai-hulud-v2-campaign-spreads-from-npm.html
+    # Note: Maven coordinates use groupId:artifactId format
+    # The mvnpm process automatically mirrors npm packages to Maven Central
+    # -------------------
+    "org.mvnpm:posthog-node": {"4.18.1"},  # First Maven package identified with Shai-Hulud payload
 }
 

@@ -24,6 +24,13 @@ class TestBatchPerformanceBenchmarks:
     """Performance benchmark tests for batch processing."""
 
     @pytest.fixture
+    def mock_cache_manager(self):
+        """Create a mock cache manager for testing."""
+        from src.github_ioc_scanner.cache_manager import CacheManager
+        cache_manager = MagicMock(spec=CacheManager)
+        return cache_manager
+
+    @pytest.fixture
     def mock_github_client(self):
         """Create a mock GitHub client for testing."""
         client = AsyncMock(spec=GitHubClient)
@@ -84,7 +91,7 @@ class TestBatchPerformanceBenchmarks:
 
     @pytest.mark.asyncio
     async def test_batch_vs_sequential_performance_benchmark(
-        self, mock_github_client, sample_repository, sample_files
+        self, mock_github_client, mock_cache_manager, sample_repository, sample_files
     ):
         """
         Benchmark comparing batch vs sequential file processing performance.
@@ -130,14 +137,14 @@ class TestBatchPerformanceBenchmarks:
 
     @pytest.mark.asyncio
     async def test_batch_coordinator_performance_benchmark(
-        self, mock_github_client, sample_repository, sample_files
+        self, mock_github_client, mock_cache_manager, sample_repository, sample_files
     ):
         """
         Benchmark BatchCoordinator performance with different strategies.
         
         Requirements: 8.1, 8.3
         """
-        coordinator = BatchCoordinator(mock_github_client)
+        coordinator = BatchCoordinator(mock_github_client, mock_cache_manager)
         
         # Test different batch strategies
         strategies = [
@@ -181,14 +188,14 @@ class TestBatchPerformanceBenchmarks:
 
     @pytest.mark.asyncio
     async def test_batch_size_optimization_benchmark(
-        self, mock_github_client, sample_repository
+        self, mock_github_client, mock_cache_manager, sample_repository
     ):
         """
         Benchmark different batch sizes to find optimal performance.
         
         Requirements: 8.1, 8.3
         """
-        coordinator = BatchCoordinator(mock_github_client)
+        coordinator = BatchCoordinator(mock_github_client, mock_cache_manager)
         
         # Create larger file list for batch size testing
         large_file_list = [f"file_{i}.json" for i in range(50)]
@@ -233,7 +240,7 @@ class TestBatchPerformanceBenchmarks:
 
     @pytest.mark.asyncio
     async def test_memory_efficiency_benchmark(
-        self, mock_github_client, sample_repository
+        self, mock_github_client, mock_cache_manager, sample_repository
     ):
         """
         Benchmark memory usage during batch processing.
@@ -243,7 +250,7 @@ class TestBatchPerformanceBenchmarks:
         import psutil
         import os
         
-        coordinator = BatchCoordinator(mock_github_client)
+        coordinator = BatchCoordinator(mock_github_client, mock_cache_manager)
         
         # Create large file list to test memory usage
         large_file_list = [f"large_file_{i}.json" for i in range(100)]
@@ -290,14 +297,14 @@ class TestBatchPerformanceBenchmarks:
 
     @pytest.mark.asyncio
     async def test_concurrent_batch_performance_benchmark(
-        self, mock_github_client, sample_repository, sample_files
+        self, mock_github_client, mock_cache_manager, sample_repository, sample_files
     ):
         """
         Benchmark concurrent batch operations performance.
         
         Requirements: 8.1, 8.3
         """
-        coordinator = BatchCoordinator(mock_github_client)
+        coordinator = BatchCoordinator(mock_github_client, mock_cache_manager)
         
         # Test different concurrency levels
         concurrency_levels = [1, 3, 5, 10]
@@ -372,14 +379,14 @@ class TestBatchPerformanceBenchmarks:
 
     @pytest.mark.asyncio
     async def test_real_world_performance_simulation(
-        self, mock_github_client, sample_repository
+        self, mock_github_client, mock_cache_manager, sample_repository
     ):
         """
         Simulate real-world performance scenarios with varying conditions.
         
         Requirements: 8.1, 8.3
         """
-        coordinator = BatchCoordinator(mock_github_client)
+        coordinator = BatchCoordinator(mock_github_client, mock_cache_manager)
         
         # Simulate different real-world scenarios
         scenarios = {
