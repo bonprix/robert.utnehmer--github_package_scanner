@@ -1290,7 +1290,7 @@ class GitHubIOCScanner:
         etag = None
         
         if cached_data:
-            repositories, etag = cached_data
+            repositories, etag, _ = cached_data  # Unpack 3 values: repos, etag, timestamp
             logger.debug(f"Found {len(repositories)} cached repositories for team {org}/{team}")
         
         # Make API request with ETag for conditional request
@@ -1298,7 +1298,7 @@ class GitHubIOCScanner:
         
         if response.not_modified and cached_data:
             # Use cached data
-            repositories, _ = cached_data
+            repositories, _, _ = cached_data  # Unpack 3 values: repos, etag, timestamp
             logger.debug(f"Repository list for team {org}/{team} not modified, using cache")
         elif response.data:
             # Update cache with new data

@@ -167,7 +167,7 @@ class IOCLoader:
             
             # Check if IOC_PACKAGES exists in the module
             if not hasattr(module, 'IOC_PACKAGES'):
-                logger.warning(f"No IOC_PACKAGES found in {file_path.name}")
+                logger.debug(f"No IOC_PACKAGES found in {file_path.name} (expected for __init__.py)")
                 return None
             
             ioc_packages = getattr(module, 'IOC_PACKAGES')

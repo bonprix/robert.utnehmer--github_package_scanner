@@ -203,21 +203,12 @@ class AsyncGitHubClient:
                 session = await self._get_session()
                 response = await session.request(method, url, headers=headers, params=params, **kwargs)
                 
-                # Log rate limit information
+                # Extract rate limit information
                 remaining = int(response.headers.get("X-RateLimit-Remaining", 0))
                 total = int(response.headers.get("X-RateLimit-Limit", 5000))
                 reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
-                log_rate_limit(logger, remaining, reset_time)
                 
-                # Update intelligent rate limiter with current status
-                self.intelligent_limiter.update_rate_limit_status(
-                    remaining=remaining,
-                    total=total,
-                    reset_time=reset_time,
-                    repo_name=repo_name
-                )
-                
-                # Handle rate limiting
+                # Handle rate limiting (403 with rate limit message)
                 if response.status_code == 403:
                     error_message = response.text.lower()
                     if "rate limit exceeded" in error_message or "api rate limit exceeded" in error_message:
@@ -249,6 +240,18 @@ class AsyncGitHubClient:
                         raise AuthenticationError("Access forbidden. Check token permissions for this resource.")
                     else:
                         raise APIError(f"Forbidden: {response.text}", status_code=403)
+                
+                # Log rate limit information only for successful responses (not errors)
+                # This prevents false "rate limit exhausted" warnings on auth errors
+                if response.status_code < 400:
+                    log_rate_limit(logger, remaining, reset_time)
+                    # Update intelligent rate limiter with current status
+                    self.intelligent_limiter.update_rate_limit_status(
+                        remaining=remaining,
+                        total=total,
+                        reset_time=reset_time,
+                        repo_name=repo_name
+                    )
                 
                 # Handle 304 Not Modified
                 if response.status_code == 304:

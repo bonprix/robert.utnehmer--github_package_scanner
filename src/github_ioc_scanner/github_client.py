@@ -271,14 +271,11 @@ class GitHubClient:
         try:
             response = self.client.request(method, url, headers=headers, params=params, **kwargs)
             
-            # Log rate limit information
+            # Extract rate limit information
             remaining = int(response.headers.get("X-RateLimit-Remaining", 0))
             reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
-            log_rate_limit(logger, remaining, reset_time)
             
-            # Proactive rate limit handling - slow down when approaching limits
-            handle_smart_rate_limiting(remaining, reset_time)            
-            # Handle rate limiting
+            # Handle rate limiting (403 with rate limit message)
             if response.status_code == 403:
                 error_message = response.text.lower()
                 if "rate limit exceeded" in error_message or "api rate limit exceeded" in error_message:
@@ -291,6 +288,13 @@ class GitHubClient:
                     raise AuthenticationError("Access forbidden. Check token permissions for this resource.")
                 else:
                     raise APIError(f"Forbidden: {response.text}", status_code=403)
+            
+            # Log rate limit information only for successful responses (not errors)
+            # This prevents false "rate limit exhausted" warnings on auth errors
+            if response.status_code < 400:
+                log_rate_limit(logger, remaining, reset_time)
+                # Proactive rate limit handling - slow down when approaching limits
+                handle_smart_rate_limiting(remaining, reset_time)
             
             # Handle 304 Not Modified
             if response.status_code == 304:
