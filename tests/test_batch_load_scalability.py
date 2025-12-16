@@ -30,6 +30,13 @@ class TestBatchLoadScalability:
     """Load and scalability tests for batch processing."""
 
     @pytest.fixture
+    def mock_cache_manager(self):
+        """Create a mock cache manager for testing."""
+        from src.github_ioc_scanner.cache_manager import CacheManager
+        cache_manager = MagicMock(spec=CacheManager)
+        return cache_manager
+
+    @pytest.fixture
     def scalable_mock_client(self):
         """Create a mock client that can handle high-volume requests."""
         client = AsyncMock(spec=AsyncGitHubClient)
@@ -124,14 +131,14 @@ class TestBatchLoadScalability:
 
     @pytest.mark.asyncio
     async def test_high_volume_single_repository_load(
-        self, scalable_mock_client, load_test_config
+        self, scalable_mock_client, mock_cache_manager, load_test_config
     ):
         """
         Test high-volume batch processing for a single large repository.
         
         Requirements: 10.1, 10.2, 10.4
         """
-        coordinator = BatchCoordinator(scalable_mock_client, load_test_config)
+        coordinator = BatchCoordinator(scalable_mock_client, mock_cache_manager, load_test_config)
         
         # Create a large repository simulation
         repo = await scalable_mock_client.get_repository("large-org/massive-repo")
@@ -188,14 +195,14 @@ class TestBatchLoadScalability:
 
     @pytest.mark.asyncio
     async def test_concurrent_batch_operations_stress(
-        self, scalable_mock_client, load_test_config
+        self, scalable_mock_client, mock_cache_manager, load_test_config
     ):
         """
         Test concurrent batch operations under stress conditions.
         
         Requirements: 10.1, 10.2, 10.4
         """
-        coordinator = BatchCoordinator(scalable_mock_client, load_test_config)
+        coordinator = BatchCoordinator(scalable_mock_client, mock_cache_manager, load_test_config)
         
         # Create multiple repositories
         repos = []
@@ -274,7 +281,7 @@ class TestBatchLoadScalability:
 
     @pytest.mark.asyncio
     async def test_memory_constrained_batch_processing(
-        self, scalable_mock_client
+        self, scalable_mock_client, mock_cache_manager
     ):
         """
         Test batch processing under memory constraints.
@@ -290,7 +297,7 @@ class TestBatchLoadScalability:
             stream_large_files_threshold=1024
         )
         
-        coordinator = BatchCoordinator(scalable_mock_client, constrained_config)
+        coordinator = BatchCoordinator(scalable_mock_client, mock_cache_manager, constrained_config)
         
         # Create large file simulation
         async def mock_large_file_contents(repo, paths):
@@ -363,14 +370,14 @@ class TestBatchLoadScalability:
 
     @pytest.mark.asyncio
     async def test_scalability_with_increasing_load(
-        self, scalable_mock_client, load_test_config
+        self, scalable_mock_client, mock_cache_manager, load_test_config
     ):
         """
         Test batch processing scalability with increasing load.
         
         Requirements: 10.1, 10.2, 10.4
         """
-        coordinator = BatchCoordinator(scalable_mock_client, load_test_config)
+        coordinator = BatchCoordinator(scalable_mock_client, mock_cache_manager, load_test_config)
         
         # Test with increasing numbers of files
         file_counts = [10, 50, 100, 200, 500]
@@ -427,14 +434,14 @@ class TestBatchLoadScalability:
 
     @pytest.mark.asyncio
     async def test_error_resilience_under_load(
-        self, scalable_mock_client, load_test_config
+        self, scalable_mock_client, mock_cache_manager, load_test_config
     ):
         """
         Test error resilience during high-load batch processing.
         
         Requirements: 10.1, 10.2, 10.4
         """
-        coordinator = BatchCoordinator(scalable_mock_client, load_test_config)
+        coordinator = BatchCoordinator(scalable_mock_client, mock_cache_manager, load_test_config)
         
         # Inject failures into the mock client
         failure_rate = 0.1  # 10% failure rate
@@ -483,14 +490,14 @@ class TestBatchLoadScalability:
 
     @pytest.mark.asyncio
     async def test_resource_cleanup_under_load(
-        self, scalable_mock_client, load_test_config
+        self, scalable_mock_client, mock_cache_manager, load_test_config
     ):
         """
         Test proper resource cleanup during high-load processing.
         
         Requirements: 10.1, 10.2, 10.4
         """
-        coordinator = BatchCoordinator(scalable_mock_client, load_test_config)
+        coordinator = BatchCoordinator(scalable_mock_client, mock_cache_manager, load_test_config)
         
         # Track resource usage over multiple batch operations
         process = psutil.Process(os.getpid())
@@ -536,7 +543,7 @@ class TestBatchLoadScalability:
 
     @pytest.mark.asyncio
     async def test_batch_processing_performance_limits(
-        self, scalable_mock_client, load_test_config
+        self, scalable_mock_client, mock_cache_manager, load_test_config
     ):
         """
         Test batch processing at performance limits.
@@ -553,7 +560,7 @@ class TestBatchLoadScalability:
             max_memory_usage_mb=500
         )
         
-        coordinator = BatchCoordinator(scalable_mock_client, extreme_config)
+        coordinator = BatchCoordinator(scalable_mock_client, mock_cache_manager, extreme_config)
         
         # Create extreme load scenario
         repos = []

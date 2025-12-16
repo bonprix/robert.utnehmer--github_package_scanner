@@ -167,7 +167,7 @@ class IOCLoader:
             
             # Check if IOC_PACKAGES exists in the module
             if not hasattr(module, 'IOC_PACKAGES'):
-                logger.warning(f"No IOC_PACKAGES found in {file_path.name}")
+                logger.debug(f"No IOC_PACKAGES found in {file_path.name} (expected for __init__.py)")
                 return None
             
             ioc_packages = getattr(module, 'IOC_PACKAGES')
@@ -184,9 +184,29 @@ class IOCLoader:
                     cause=e
                 )
             
+            # Check for Maven IOC packages (optional)
+            validated_maven_packages = None
+            if hasattr(module, 'MAVEN_IOC_PACKAGES'):
+                maven_ioc_packages = getattr(module, 'MAVEN_IOC_PACKAGES')
+                if maven_ioc_packages:  # Only validate if not empty
+                    try:
+                        validated_maven_packages = self._validate_ioc_packages(
+                            maven_ioc_packages, file_path.name, package_type="Maven"
+                        )
+                        logger.info(f"Loaded {len(validated_maven_packages)} Maven IOC packages from {file_path.name}")
+                    except IOCFileError:
+                        raise
+                    except Exception as e:
+                        raise IOCFileError(
+                            f"Maven IOC validation error in {file_path.name}: {e}",
+                            source_file=str(file_path),
+                            cause=e
+                        )
+            
             return IOCDefinition(
                 packages=validated_packages,
-                source_file=str(file_path)
+                source_file=str(file_path),
+                maven_packages=validated_maven_packages
             )
             
         except IOCFileError:
@@ -199,12 +219,13 @@ class IOCLoader:
                 cause=e
             )
     
-    def _validate_ioc_packages(self, ioc_packages: object, source_file: str) -> Dict[str, Optional[Set[str]]]:
+    def _validate_ioc_packages(self, ioc_packages: object, source_file: str, package_type: str = "npm") -> Dict[str, Optional[Set[str]]]:
         """Validate and normalize IOC_PACKAGES dictionary structure.
         
         Args:
             ioc_packages: The IOC_PACKAGES object from the loaded module
             source_file: Name of the source file for error reporting
+            package_type: Type of packages being validated ("npm" or "Maven")
             
         Returns:
             Validated and normalized packages dictionary
@@ -212,13 +233,15 @@ class IOCLoader:
         Raises:
             IOCFileError: If the structure is invalid
         """
+        type_label = f"{package_type} IOC_PACKAGES" if package_type != "npm" else "IOC_PACKAGES"
+        
         if not isinstance(ioc_packages, dict):
             raise IOCFileError(
-                f"IOC_PACKAGES in {source_file} must be a dictionary, got {type(ioc_packages)}"
+                f"{type_label} in {source_file} must be a dictionary, got {type(ioc_packages)}"
             )
         
         if not ioc_packages:
-            raise IOCFileError(f"IOC_PACKAGES in {source_file} is empty")
+            raise IOCFileError(f"{type_label} in {source_file} is empty")
         
         validated_packages: Dict[str, Optional[Set[str]]] = {}
         
@@ -300,7 +323,7 @@ class IOCLoader:
             # Add source file name to hash
             hasher.update(source_file.encode('utf-8'))
             
-            # Sort packages by name for consistent hashing
+            # Sort npm packages by name for consistent hashing
             for package_name in sorted(ioc_def.packages.keys()):
                 versions = ioc_def.packages[package_name]
                 
@@ -314,11 +337,23 @@ class IOCLoader:
                     # Sort versions for consistent hashing
                     for version in sorted(versions):
                         hasher.update(version.encode('utf-8'))
+            
+            # Include Maven packages in hash calculation
+            if ioc_def.maven_packages:
+                hasher.update(b'__MAVEN_PACKAGES__')
+                for package_name in sorted(ioc_def.maven_packages.keys()):
+                    versions = ioc_def.maven_packages[package_name]
+                    hasher.update(package_name.encode('utf-8'))
+                    if versions is None:
+                        hasher.update(b'__ANY_VERSION__')
+                    else:
+                        for version in sorted(versions):
+                            hasher.update(version.encode('utf-8'))
         
         return hasher.hexdigest()
     
     def get_all_packages(self) -> Dict[str, Optional[Set[str]]]:
-        """Get all IOC packages merged from all loaded definitions.
+        """Get all npm IOC packages merged from all loaded definitions.
         
         Returns:
             Dictionary mapping package names to version sets (or None for any version)
@@ -347,12 +382,68 @@ class IOCLoader:
         
         return merged_packages
     
-    def is_package_compromised(self, package_name: str, version: str) -> bool:
+    def get_all_maven_packages(self) -> Dict[str, Optional[Set[str]]]:
+        """Get all Maven IOC packages merged from all loaded definitions.
+        
+        Returns:
+            Dictionary mapping "groupId:artifactId" to version sets (or None for any version)
+            
+        Raises:
+            IOCLoaderError: If no IOC definitions are loaded
+        """
+        if not self._ioc_definitions:
+            raise IOCLoaderError("No IOC definitions loaded. Call load_iocs() first.")
+        
+        merged_packages: Dict[str, Optional[Set[str]]] = {}
+        
+        for ioc_def in self._ioc_definitions.values():
+            if not ioc_def.maven_packages:
+                continue
+                
+            for package_name, versions in ioc_def.maven_packages.items():
+                if package_name in merged_packages:
+                    existing_versions = merged_packages[package_name]
+                    
+                    # If either definition says "any version", use None
+                    if existing_versions is None or versions is None:
+                        merged_packages[package_name] = None
+                    else:
+                        # Merge version sets
+                        merged_packages[package_name] = existing_versions.union(versions)
+                else:
+                    merged_packages[package_name] = versions
+        
+        return merged_packages
+    
+    def get_ioc_statistics(self) -> Dict[str, int]:
+        """Get statistics about loaded IOC definitions.
+        
+        Returns:
+            Dictionary with counts of npm packages, Maven packages, and total
+            
+        Raises:
+            IOCLoaderError: If no IOC definitions are loaded
+        """
+        if not self._ioc_definitions:
+            raise IOCLoaderError("No IOC definitions loaded. Call load_iocs() first.")
+        
+        npm_packages = self.get_all_packages()
+        maven_packages = self.get_all_maven_packages()
+        
+        return {
+            "npm_packages": len(npm_packages),
+            "maven_packages": len(maven_packages),
+            "total_packages": len(npm_packages) + len(maven_packages),
+            "source_files": len(self._ioc_definitions)
+        }
+    
+    def is_package_compromised(self, package_name: str, version: str, package_type: str = "npm") -> bool:
         """Check if a specific package version is compromised.
         
         Args:
-            package_name: Name of the package to check
+            package_name: Name of the package to check (for Maven: "groupId:artifactId")
             version: Version of the package to check
+            package_type: Type of package - "npm" or "maven"
             
         Returns:
             True if the package version is compromised, False otherwise
@@ -360,9 +451,10 @@ class IOCLoader:
         Raises:
             IOCLoaderError: If no IOC definitions are loaded
         """
-        all_packages = self.get_all_packages()
-        
-
+        if package_type.lower() == "maven":
+            all_packages = self.get_all_maven_packages()
+        else:
+            all_packages = self.get_all_packages()
         
         if package_name not in all_packages:
             return False

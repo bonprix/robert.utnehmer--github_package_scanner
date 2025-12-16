@@ -21,6 +21,7 @@ from .ruby import GemfileLockParser
 from .php import ComposerLockParser
 from .go import GoModParser, GoSumParser
 from .rust import CargoLockParser
+from .maven import MavenParser
 
 # Register JavaScript parsers
 register_parser(r'package\.json$', PackageJsonParser)
@@ -49,6 +50,9 @@ register_parser(r'go\.sum$', GoSumParser)
 # Register Rust parsers
 register_parser(r'Cargo\.lock$', CargoLockParser)
 
+# Register Maven parsers
+register_parser(r'pom\.xml$', MavenParser)
+
 __all__ = [
     'PackageParser',
     'PackageParserFactory', 
@@ -74,5 +78,7 @@ __all__ = [
     'GoModParser',
     'GoSumParser',
     # Rust parsers
-    'CargoLockParser'
+    'CargoLockParser',
+    # Maven parsers
+    'MavenParser',
 ]

@@ -12,7 +12,7 @@ from .exceptions import (
     format_error_message
 )
 from .logging_config import get_logger, setup_logging
-from .models import IOCMatch, ScanConfig, CacheStats
+from .models import IOCMatch, ScanConfig, CacheStats, ScanResults, WorkflowFinding, SecretFinding
 
 logger = get_logger(__name__)
 
@@ -99,6 +99,19 @@ Batch Processing:
 
   # Use batch configuration file
   github-ioc-scan --org myorg --batch-config batch-config.json
+
+Security Scanning:
+  # Enable GitHub Actions workflow security scanning
+  github-ioc-scan --org myorg --scan-workflows
+
+  # Enable secrets detection (AWS keys, GitHub tokens, etc.)
+  github-ioc-scan --org myorg --scan-secrets
+
+  # Enable both workflow and secrets scanning
+  github-ioc-scan --org myorg --scan-workflows --scan-secrets
+
+  # Disable Maven scanning (enabled by default)
+  github-ioc-scan --org myorg --disable-maven
 
 Scan Modes:
   Organization Mode: Scan all repositories in an organization
@@ -223,6 +236,15 @@ Authentication:
             help="Disable scan state saving",
         )
 
+        # IOC management options
+        ioc_group = parser.add_argument_group("IOC management")
+        
+        ioc_group.add_argument(
+            "--update-iocs",
+            action="store_true",
+            help="Update Shai-Hulud IOC definitions from Wiz Research and exit",
+        )
+
         # Cache management options
         cache_group = parser.add_argument_group("cache management")
         
@@ -258,6 +280,12 @@ Authentication:
             type=int,
             metavar="DAYS",
             help="Remove cache entries older than specified days",
+        )
+
+        cache_group.add_argument(
+            "--refresh-repos",
+            action="store_true",
+            help="Refresh repository list from GitHub (ignore cached repository list)",
         )
 
         # Output and logging options
@@ -382,6 +410,46 @@ Authentication:
             help="Number of requests to keep in reserve (default: 50)",
         )
 
+        # Security scanning options
+        security_group = parser.add_argument_group("security scanning")
+        
+        security_group.add_argument(
+            "--scan-workflows",
+            action="store_true",
+            help="Enable GitHub Actions workflow scanning for security issues (dangerous triggers, malicious runners)",
+        )
+        
+        security_group.add_argument(
+            "--no-scan-workflows",
+            action="store_true",
+            help="Disable GitHub Actions workflow scanning",
+        )
+        
+        security_group.add_argument(
+            "--scan-secrets",
+            action="store_true",
+            help="Enable secrets scanning to detect exfiltrated credentials (AWS keys, GitHub tokens, API keys)",
+        )
+        
+        security_group.add_argument(
+            "--no-scan-secrets",
+            action="store_true",
+            help="Disable secrets scanning",
+        )
+        
+        security_group.add_argument(
+            "--enable-maven",
+            action="store_true",
+            default=True,
+            help="Enable Maven (pom.xml) scanning for Java dependencies (default: enabled)",
+        )
+        
+        security_group.add_argument(
+            "--disable-maven",
+            action="store_true",
+            help="Disable Maven (pom.xml) scanning",
+        )
+
         # Parse arguments (use provided args for testing, otherwise parse from sys.argv)
         parsed_args = parser.parse_args(args)
 
@@ -399,6 +467,25 @@ Authentication:
         elif parsed_args.enable_sbom:
             enable_sbom = True
 
+        # Handle security scanning options
+        scan_workflows = False  # Default to disabled
+        if parsed_args.scan_workflows:
+            scan_workflows = True
+        elif parsed_args.no_scan_workflows:
+            scan_workflows = False
+        
+        scan_secrets = False  # Default to disabled
+        if parsed_args.scan_secrets:
+            scan_secrets = True
+        elif parsed_args.no_scan_secrets:
+            scan_secrets = False
+        
+        enable_maven = True  # Default to enabled
+        if parsed_args.disable_maven:
+            enable_maven = False
+        elif parsed_args.enable_maven:
+            enable_maven = True
+
         return ScanConfig(
             org=parsed_args.org,
             team=parsed_args.team,
@@ -415,11 +502,13 @@ Authentication:
             list_scans=getattr(parsed_args, 'list_scans', False),
             save_state=not getattr(parsed_args, 'no_save_state', False),
             no_save_state=getattr(parsed_args, 'no_save_state', False),
+            update_iocs=getattr(parsed_args, 'update_iocs', False),
             clear_cache=parsed_args.clear_cache,
             clear_cache_type=parsed_args.clear_cache_type,
             refresh_repo=parsed_args.refresh_repo,
             cache_info=parsed_args.cache_info,
             cleanup_cache=parsed_args.cleanup_cache,
+            use_repo_cache=not getattr(parsed_args, 'refresh_repos', False),
             verbose=getattr(parsed_args, 'verbose', False),
             log_file=getattr(parsed_args, 'log_file', None),
             quiet=getattr(parsed_args, 'quiet', False),
@@ -435,6 +524,9 @@ Authentication:
             rate_limit_strategy=getattr(parsed_args, 'rate_limit_strategy', 'normal'),
             enable_intelligent_rate_limiting=not getattr(parsed_args, 'disable_intelligent_rate_limiting', False),
             rate_limit_safety_margin=getattr(parsed_args, 'rate_limit_safety_margin', 50),
+            scan_workflows=scan_workflows,
+            scan_secrets=scan_secrets,
+            enable_maven=enable_maven,
         )
 
     def validate_arguments(self, config: ScanConfig) -> bool:
@@ -447,7 +539,7 @@ Authentication:
         """
         errors = []
 
-        # Check if this is a cache-only or resume-only operation
+        # Check if this is a cache-only, resume-only, or IOC-update operation
         is_cache_only = any([
             config.cache_info,
             config.clear_cache,
@@ -461,8 +553,10 @@ Authentication:
             config.resume is not None
         ])
         
-        # Organization is required for all scan modes (but not cache-only or resume-only operations)
-        if not config.org and not is_cache_only and not is_resume_only:
+        is_ioc_update = config.update_iocs
+        
+        # Organization is required for all scan modes (but not cache-only, resume-only, or IOC-update operations)
+        if not config.org and not is_cache_only and not is_resume_only and not is_ioc_update:
             errors.append(ValidationError("--org is required for all scan modes", field="org"))
 
         # Team requires organization
@@ -524,6 +618,10 @@ Authentication:
 
         # Validate batch processing arguments
         if not self.validate_batch_arguments(config):
+            return False
+
+        # Validate security scanning arguments
+        if not self.validate_security_arguments(config):
             return False
 
         return True
@@ -588,6 +686,34 @@ Authentication:
                 print(f"  - {error.message}", file=sys.stderr)
             return False
 
+        return True
+
+    def validate_security_arguments(self, config: ScanConfig) -> bool:
+        """Validate security scanning arguments.
+        
+        Args:
+            config: The parsed scan configuration
+            
+        Returns:
+            True if validation passes, False otherwise
+        """
+        # No conflicting options to validate currently
+        # Both scan_workflows and scan_secrets can be enabled simultaneously
+        # enable_maven is independent of other options
+        
+        # Log info about enabled security features if verbose
+        if config.verbose:
+            enabled_features = []
+            if config.scan_workflows:
+                enabled_features.append("workflow scanning")
+            if config.scan_secrets:
+                enabled_features.append("secrets scanning")
+            if config.enable_maven:
+                enabled_features.append("Maven scanning")
+            
+            if enabled_features:
+                logger.info(f"Security features enabled: {', '.join(enabled_features)}")
+        
         return True
 
     def load_batch_config_from_file(self, config_file: str) -> dict:
@@ -829,13 +955,30 @@ Authentication:
             scan_config.append("Excluding archived repositories")
         
         print(f"Configuration: {', '.join(scan_config)}")
+        
+        # Show enabled security scans
+        enabled_scans = ["Package IOC detection"]
+        if config.scan_workflows:
+            enabled_scans.append("Workflow security analysis")
+        if config.scan_secrets:
+            enabled_scans.append("Secrets detection")
+        if config.enable_maven:
+            enabled_scans.append("Maven/pom.xml support")
+        
+        print(f"Security scans: {', '.join(enabled_scans)}")
         print(f"IOC Database: {total_iocs:,} threat indicators loaded (incl. Heise-reported npm attacks)")
         print(f"Scan initiated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("-" * 60)
 
-    def display_professional_results(self, results: List[IOCMatch], config: ScanConfig) -> None:
+    def display_professional_results(self, results: List[IOCMatch], config: ScanConfig,
+                                      workflow_findings: Optional[List[WorkflowFinding]] = None,
+                                      secret_findings: Optional[List[SecretFinding]] = None) -> None:
         """Display results in a professional format for security analysts."""
-        if not results:
+        has_ioc_results = bool(results)
+        has_workflow_findings = bool(workflow_findings)
+        has_secret_findings = bool(secret_findings)
+        
+        if not has_ioc_results and not has_workflow_findings and not has_secret_findings:
             if not config.quiet:
                 print("✅ SCAN COMPLETE - No threats detected")
                 print("   All scanned packages are clean")
@@ -844,33 +987,97 @@ Authentication:
         # Security alert header
         print("🚨 SECURITY ALERT - THREATS DETECTED")
         print("=" * 60)
-        print(f"Found {len(results)} indicators of compromise:")
+        
+        total_issues = len(results) if results else 0
+        if workflow_findings:
+            total_issues += len(workflow_findings)
+        if secret_findings:
+            total_issues += len(secret_findings)
+        
+        print(f"Found {total_issues} security issues:")
         print()
 
-        # Group results by repository for better readability
-        repo_groups = {}
-        for match in results:
-            if match.repo not in repo_groups:
-                repo_groups[match.repo] = []
-            repo_groups[match.repo].append(match)
+        # Display IOC matches
+        if has_ioc_results:
+            print("📦 COMPROMISED PACKAGES:")
+            print("-" * 40)
+            # Group results by repository for better readability
+            repo_groups = {}
+            for match in results:
+                if match.repo not in repo_groups:
+                    repo_groups[match.repo] = []
+                repo_groups[match.repo].append(match)
 
-        # Display results grouped by repository
-        for repo, matches in sorted(repo_groups.items()):
-            print(f"📦 Repository: {repo}")
-            print(f"   Threats found: {len(matches)}")
+            # Display results grouped by repository
+            for repo, matches in sorted(repo_groups.items()):
+                print(f"   Repository: {repo}")
+                print(f"   Threats found: {len(matches)}")
+                
+                for match in sorted(matches, key=lambda x: (x.file_path, x.package_name)):
+                    print(f"   ⚠️  {match.file_path} | {match.package_name} | {match.version}")
+                print()
+
+        # Display workflow findings
+        if has_workflow_findings:
+            print("🔧 WORKFLOW SECURITY ISSUES:")
+            print("-" * 40)
+            # Group by repository
+            workflow_by_repo = {}
+            for finding in workflow_findings:
+                if finding.repo not in workflow_by_repo:
+                    workflow_by_repo[finding.repo] = []
+                workflow_by_repo[finding.repo].append(finding)
             
-            for match in sorted(matches, key=lambda x: (x.file_path, x.package_name)):
-                print(f"   ⚠️  {match.file_path} | {match.package_name} | {match.version}")
-            print()
+            for repo, findings in sorted(workflow_by_repo.items()):
+                print(f"   Repository: {repo}")
+                for finding in findings:
+                    severity_icon = "🔴" if finding.severity == "critical" else "🟠" if finding.severity == "high" else "🟡"
+                    print(f"   {severity_icon} [{finding.severity.upper()}] {finding.finding_type}")
+                    print(f"      File: {finding.file_path}")
+                    print(f"      {finding.description}")
+                    if finding.recommendation:
+                        print(f"      💡 {finding.recommendation}")
+                print()
+
+        # Display secret findings
+        if has_secret_findings:
+            print("🔑 EXPOSED SECRETS:")
+            print("-" * 40)
+            # Group by repository
+            secrets_by_repo = {}
+            for finding in secret_findings:
+                if finding.repo not in secrets_by_repo:
+                    secrets_by_repo[finding.repo] = []
+                secrets_by_repo[finding.repo].append(finding)
+            
+            for repo, findings in sorted(secrets_by_repo.items()):
+                print(f"   Repository: {repo}")
+                for finding in findings:
+                    severity_icon = "🔴" if finding.severity == "critical" else "🟠" if finding.severity == "high" else "🟡"
+                    print(f"   {severity_icon} [{finding.severity.upper()}] {finding.secret_type}")
+                    print(f"      File: {finding.file_path}:{finding.line_number}")
+                    print(f"      Masked value: {finding.masked_value}")
+                    if finding.recommendation:
+                        print(f"      💡 {finding.recommendation}")
+                print()
 
         # Summary
-        total_repos = len(repo_groups)
         print("-" * 60)
-        print(f"SUMMARY: {len(results)} threats across {total_repos} repositories")
+        summary_parts = []
+        if has_ioc_results:
+            summary_parts.append(f"{len(results)} compromised packages")
+        if has_workflow_findings:
+            summary_parts.append(f"{len(workflow_findings)} workflow issues")
+        if has_secret_findings:
+            summary_parts.append(f"{len(secret_findings)} exposed secrets")
+        
+        print(f"SUMMARY: {', '.join(summary_parts)}")
         print("ACTION REQUIRED: Review and remediate identified threats")
 
     def display_professional_summary(self, repos_scanned: int, files_scanned: int, 
-                                   cache_stats: 'CacheStats', config: ScanConfig) -> None:
+                                   cache_stats: 'CacheStats', config: ScanConfig,
+                                   workflow_findings: Optional[List[WorkflowFinding]] = None,
+                                   secret_findings: Optional[List[SecretFinding]] = None) -> None:
         """Display professional scan summary."""
         if config.quiet:
             return
@@ -879,6 +1086,15 @@ Authentication:
         print("SCAN STATISTICS:")
         print(f"  Repositories scanned: {repos_scanned:,}")
         print(f"  Files analyzed: {files_scanned:,}")
+        
+        # Show workflow and secrets scan statistics if enabled
+        if config.scan_workflows:
+            workflow_count = len(workflow_findings) if workflow_findings else 0
+            print(f"  Workflow issues found: {workflow_count}")
+        
+        if config.scan_secrets:
+            secrets_count = len(secret_findings) if secret_findings else 0
+            print(f"  Secrets detected: {secrets_count}")
         
         if cache_stats.hits + cache_stats.misses > 0:
             hit_rate = (cache_stats.hits / (cache_stats.hits + cache_stats.misses)) * 100
@@ -1118,6 +1334,170 @@ def main() -> None:
         from .ioc_loader import IOCLoader
         from .scanner import GitHubIOCScanner
         
+        # Handle IOC update operation
+        if config.update_iocs:
+            if not config.quiet:
+                print("=" * 60)
+                print("Shai-Hulud IOC Auto-Update")
+                print("=" * 60)
+                print()
+            
+            try:
+                import csv
+                from datetime import datetime
+                from pathlib import Path
+                from urllib.request import urlopen
+                
+                # Download CSV
+                url = "https://raw.githubusercontent.com/wiz-sec-public/wiz-research-iocs/main/reports/shai-hulud-2-packages.csv"
+                if not config.quiet:
+                    print(f"Downloading IOC data from Wiz Research...")
+                
+                with urlopen(url) as response:
+                    content = response.read().decode('utf-8')
+                
+                reader = csv.DictReader(content.splitlines())
+                packages_data = list(reader)
+                
+                if not config.quiet:
+                    print(f"✓ Downloaded {len(packages_data)} packages")
+                
+                # Parse packages
+                ioc_packages = {}
+                for row in packages_data:
+                    package_name = (row.get('Package') or row.get('package', '')).strip()
+                    version = (row.get('Version') or row.get('version', '')).strip()
+                    
+                    if version.startswith('= '):
+                        version = version[2:].strip()
+                    
+                    if not package_name:
+                        continue
+                    
+                    if package_name not in ioc_packages:
+                        ioc_packages[package_name] = []
+                    
+                    if version and version not in ioc_packages[package_name]:
+                        ioc_packages[package_name].append(version)
+                
+                if not config.quiet:
+                    print(f"✓ Parsed {len(ioc_packages)} unique packages")
+                
+                # Load existing IOCs for comparison
+                ioc_file = Path(__file__).parent / "issues" / "shai_hulud_2.py"
+                old_packages = {}
+                if ioc_file.exists():
+                    try:
+                        # Read existing file
+                        old_content = ioc_file.read_text()
+                        # Extract IOC_PACKAGES dict
+                        if 'IOC_PACKAGES = {' in old_content:
+                            import ast
+                            # Parse the Python file to extract IOC_PACKAGES
+                            tree = ast.parse(old_content)
+                            for node in ast.walk(tree):
+                                if isinstance(node, ast.Assign):
+                                    for target in node.targets:
+                                        if isinstance(target, ast.Name) and target.id == 'IOC_PACKAGES':
+                                            old_packages = ast.literal_eval(node.value)
+                                            break
+                    except Exception as e:
+                        if not config.quiet:
+                            print(f"⚠️  Could not parse existing IOCs: {e}")
+                
+                # Compare old and new packages
+                new_package_names = set(ioc_packages.keys()) - set(old_packages.keys())
+                removed_package_names = set(old_packages.keys()) - set(ioc_packages.keys())
+                updated_packages = []
+                
+                for pkg in set(ioc_packages.keys()) & set(old_packages.keys()):
+                    old_versions = set(old_packages[pkg] or [])
+                    new_versions = set(ioc_packages[pkg] or [])
+                    if old_versions != new_versions:
+                        new_vers = new_versions - old_versions
+                        if new_vers:
+                            updated_packages.append((pkg, list(new_vers)))
+                
+                # Generate IOC file
+                lines = [
+                    '"""',
+                    'Shai-Hulud 2.0 Supply Chain Attack IOC Definitions',
+                    '',
+                    'Source: Wiz Research',
+                    'URL: https://github.com/wiz-sec-public/wiz-research-iocs',
+                    f'Last Updated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}',
+                    '"""',
+                    '',
+                    'IOC_PACKAGES = {',
+                ]
+                
+                for package_name in sorted(ioc_packages.keys()):
+                    versions = ioc_packages[package_name]
+                    if versions:
+                        versions_str = ', '.join(f'"{v}"' for v in sorted(versions))
+                        lines.append(f'    "{package_name}": [{versions_str}],')
+                    else:
+                        lines.append(f'    "{package_name}": None,')
+                
+                lines.append('}')
+                lines.append('')
+                
+                ioc_file.write_text('\n'.join(lines))
+                
+                if not config.quiet:
+                    print(f"✓ Successfully updated {ioc_file}")
+                    print()
+                    
+                    # Show changes
+                    if new_package_names or updated_packages or removed_package_names:
+                        print("📊 Changes detected:")
+                        print("-" * 60)
+                        
+                        if new_package_names:
+                            print(f"  🆕 New packages: {len(new_package_names)}")
+                            if len(new_package_names) <= 10:
+                                for pkg in sorted(new_package_names):
+                                    print(f"     - {pkg}")
+                            else:
+                                for pkg in sorted(list(new_package_names)[:10]):
+                                    print(f"     - {pkg}")
+                                print(f"     ... and {len(new_package_names) - 10} more")
+                        
+                        if updated_packages:
+                            print(f"  🔄 Updated packages: {len(updated_packages)}")
+                            if len(updated_packages) <= 10:
+                                for pkg, new_vers in updated_packages:
+                                    print(f"     - {pkg}: {', '.join(new_vers)}")
+                            else:
+                                for pkg, new_vers in updated_packages[:10]:
+                                    print(f"     - {pkg}: {', '.join(new_vers)}")
+                                print(f"     ... and {len(updated_packages) - 10} more")
+                        
+                        if removed_package_names:
+                            print(f"  ➖ Removed packages: {len(removed_package_names)}")
+                            if len(removed_package_names) <= 10:
+                                for pkg in sorted(removed_package_names):
+                                    print(f"     - {pkg}")
+                            else:
+                                for pkg in sorted(list(removed_package_names)[:10]):
+                                    print(f"     - {pkg}")
+                                print(f"     ... and {len(removed_package_names) - 10} more")
+                        
+                        print()
+                    else:
+                        print("ℹ️  No changes detected - IOCs are up to date")
+                        print()
+                    
+                    print("=" * 60)
+                    print("✓ Update complete!")
+                    print("=" * 60)
+                
+                return
+                
+            except Exception as e:
+                print(f"✗ Failed to update IOCs: {e}", file=sys.stderr)
+                sys.exit(1)
+        
         # Handle cache-only operations first
         if config.cache_info or config.clear_cache or config.clear_cache_type or config.refresh_repo or config.cleanup_cache:
             cache_manager = CacheManager()
@@ -1327,7 +1707,12 @@ def main() -> None:
             cli.clear_progress_line(config)
             
             # Display results in professional format
-            cli.display_professional_results(results.matches, config)
+            cli.display_professional_results(
+                results.matches, 
+                config,
+                workflow_findings=results.workflow_findings,
+                secret_findings=results.secret_findings
+            )
             
             # Close cache connection for cleanup
             try:
@@ -1340,7 +1725,9 @@ def main() -> None:
                 results.repositories_scanned, 
                 results.files_scanned, 
                 results.cache_stats, 
-                config
+                config,
+                workflow_findings=results.workflow_findings,
+                secret_findings=results.secret_findings
             )
             
         except Exception as e:

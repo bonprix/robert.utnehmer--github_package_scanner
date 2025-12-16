@@ -195,13 +195,14 @@ class TestBatchConfig:
         """Test default batch configuration."""
         config = BatchConfig()
         
-        assert config.max_concurrent_requests == 10
-        assert config.max_concurrent_repos == 3
-        assert config.default_batch_size == 10
-        assert config.max_batch_size == 50
-        assert config.min_batch_size == 1
-        assert config.rate_limit_buffer == 0.8
-        assert config.retry_attempts == 3
+        # Updated defaults optimized for maximum speed
+        assert config.max_concurrent_requests == 50
+        assert config.max_concurrent_repos == 15
+        assert config.default_batch_size == 25
+        assert config.max_batch_size == 100
+        assert config.min_batch_size == 5
+        assert config.rate_limit_buffer == 0.95
+        assert config.retry_attempts == 5
         assert config.default_strategy == BatchStrategy.ADAPTIVE
     
     def test_batch_config_validation_success(self):
@@ -260,10 +261,10 @@ class TestPrioritizedFile:
     """Test PrioritizedFile model."""
     
     def test_prioritized_file_high_priority(self):
-        """Test high priority file detection."""
+        """Test high priority file detection when priority is 0."""
         file = PrioritizedFile(
             path="package.json",
-            priority=5,
+            priority=0,  # Priority 0 triggers auto-detection
             file_type="json",
             estimated_size=1024
         )

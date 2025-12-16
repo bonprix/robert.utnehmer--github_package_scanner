@@ -1,0 +1,13 @@
+# pull_request_target without unsafe checkout - still flagged but lower severity
+name: PR Target Safe
+
+on:
+  pull_request_target:
+    types: [labeled]
+
+jobs:
+  label-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check labels
+        run: echo "Checking labels"

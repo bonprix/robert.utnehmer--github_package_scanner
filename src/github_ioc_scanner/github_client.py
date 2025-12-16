@@ -32,6 +32,13 @@ from .github_app_auth import create_github_app_auth, GitHubAppAuth
 logger = get_logger(__name__)
 
 
+def _format_reset_time(reset_time: int) -> str:
+    """Format rate limit reset time safely, handling invalid timestamps."""
+    if reset_time and reset_time > 0:
+        return f"Resets at {datetime.fromtimestamp(reset_time)}"
+    return "reset time unknown"
+
+
 class GitHubClient:
     """Client for interacting with the GitHub API with rate limiting and ETag support."""
 
@@ -200,7 +207,7 @@ class GitHubClient:
                     if "rate limit exceeded" in error_message or "api rate limit exceeded" in error_message:
                         reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
                         raise RateLimitError(
-                            f"GitHub API rate limit exceeded. Resets at {datetime.fromtimestamp(reset_time)}",
+                            f"GitHub API rate limit exceeded. {_format_reset_time(reset_time)}",
                             reset_time=reset_time
                         )
                 
@@ -264,26 +271,30 @@ class GitHubClient:
         try:
             response = self.client.request(method, url, headers=headers, params=params, **kwargs)
             
-            # Log rate limit information
+            # Extract rate limit information
             remaining = int(response.headers.get("X-RateLimit-Remaining", 0))
             reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
-            log_rate_limit(logger, remaining, reset_time)
             
-            # Proactive rate limit handling - slow down when approaching limits
-            handle_smart_rate_limiting(remaining, reset_time)            
-            # Handle rate limiting
+            # Handle rate limiting (403 with rate limit message)
             if response.status_code == 403:
                 error_message = response.text.lower()
                 if "rate limit exceeded" in error_message or "api rate limit exceeded" in error_message:
                     reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
                     raise RateLimitError(
-                        f"GitHub API rate limit exceeded. Resets at {datetime.fromtimestamp(reset_time)}",
+                        f"GitHub API rate limit exceeded. {_format_reset_time(reset_time)}",
                         reset_time=reset_time
                     )
                 elif "forbidden" in error_message:
                     raise AuthenticationError("Access forbidden. Check token permissions for this resource.")
                 else:
                     raise APIError(f"Forbidden: {response.text}", status_code=403)
+            
+            # Log rate limit information only for successful responses (not errors)
+            # This prevents false "rate limit exhausted" warnings on auth errors
+            if response.status_code < 400:
+                log_rate_limit(logger, remaining, reset_time)
+                # Proactive rate limit handling - slow down when approaching limits
+                handle_smart_rate_limiting(remaining, reset_time)
             
             # Handle 304 Not Modified
             if response.status_code == 304:
@@ -434,17 +445,25 @@ class GitHubClient:
             all_repos = []
             page = 1
             
+            logger.info(f"Using REST API for repository discovery (fallback mode)")
+            
             while True:
                 params["page"] = page
                 logger.info(f"Fetching repositories page {page} for organization {org}...")
+                
+                # Show progress on console (overwrite same line)
+                print(f"\r   Loading page {page}... ({len(all_repos)} repositories found)", end='', flush=True)
+                
                 response = self._make_request("GET", url, etag=etag if page == 1 else None, params=params)
                 
                 if response.not_modified and page == 1:
+                    print()  # New line after progress
                     return response
                     
                 if not response.data:
                     # Empty response could mean organization not found or no repos
                     if page == 1:
+                        print()  # New line after progress
                         raise OrganizationNotFoundError(org)
                     break
                     
@@ -480,6 +499,8 @@ class GitHubClient:
                     
                 page += 1
             
+            # Clear progress line and show final count
+            print(f"\r   ✓ Loaded {len(all_repos)} repositories from {page} page(s)          ")
             logger.info(f"Retrieved {len(all_repos)} repositories for organization {org}")
             
             return APIResponse(
@@ -541,6 +562,171 @@ class GitHubClient:
             log_exception(logger, f"Failed to get repositories for organization {org}", e)
             return APIResponse(data=[])  # Return empty instead of crashing
 
+    def get_organization_repos_graphql(
+        self, org: str, include_archived: bool = False, 
+        cached_repos: Optional[List[Repository]] = None,
+        cache_cutoff: Optional[datetime] = None
+    ) -> APIResponse:
+        """Get all repositories for an organization using GraphQL (faster for large orgs).
+        
+        GraphQL allows fetching 100 repos per request with cursor-based pagination,
+        which is more efficient than REST API pagination.
+        
+        Supports incremental fetching: if cached_repos and cache_cutoff are provided,
+        only fetches repos updated after the cutoff and merges with cached repos.
+        
+        Args:
+            org: Organization name
+            include_archived: Whether to include archived repositories
+            cached_repos: Previously cached repositories (for incremental update)
+            cache_cutoff: Only fetch repos updated after this timestamp
+            
+        Returns:
+            APIResponse containing list of Repository objects
+        """
+        try:
+            # Sort by PUSHED_AT (most recently pushed first) for incremental fetching
+            query = """
+            query($org: String!, $cursor: String) {
+                organization(login: $org) {
+                    repositories(first: 100, after: $cursor, orderBy: {field: PUSHED_AT, direction: DESC}) {
+                        pageInfo {
+                            hasNextPage
+                            endCursor
+                        }
+                        nodes {
+                            name
+                            nameWithOwner
+                            isArchived
+                            defaultBranchRef {
+                                name
+                            }
+                            updatedAt
+                            pushedAt
+                        }
+                    }
+                }
+            }
+            """
+            
+            new_repos = []
+            cursor = None
+            page = 1
+            stop_fetching = False
+            incremental_mode = cached_repos is not None and cache_cutoff is not None
+            
+            if incremental_mode:
+                logger.info(f"Using incremental GraphQL fetch (cutoff: {cache_cutoff})")
+                print(f"   🔄 Checking for new/updated repositories...", end='', flush=True)
+            else:
+                logger.info(f"Using GraphQL API for repository discovery (faster for large orgs)")
+            
+            while True:
+                if not incremental_mode:
+                    print(f"\r   Loading page {page}... ({len(new_repos)} repositories found)", end='', flush=True)
+                
+                variables = {"org": org, "cursor": cursor}
+                
+                response = self.client.post(
+                    f"{self.BASE_URL}/graphql",
+                    json={"query": query, "variables": variables},
+                    timeout=30.0
+                )
+                
+                if response.status_code == 401:
+                    print()
+                    raise AuthenticationError("Invalid or expired GitHub token")
+                elif response.status_code == 403:
+                    # Check for rate limiting
+                    if 'rate limit' in response.text.lower():
+                        print()
+                        raise RateLimitError("GraphQL rate limit exceeded")
+                    raise AuthenticationError(f"Access denied to organization {org}")
+                elif response.status_code != 200:
+                    print()
+                    raise APIError(f"GraphQL request failed: {response.status_code}")
+                
+                data = response.json()
+                
+                if 'errors' in data:
+                    print()
+                    error_msg = data['errors'][0].get('message', 'Unknown GraphQL error')
+                    if 'Could not resolve to an Organization' in error_msg:
+                        raise OrganizationNotFoundError(org)
+                    raise APIError(f"GraphQL error: {error_msg}")
+                
+                org_data = data.get('data', {}).get('organization', {})
+                repos_data = org_data.get('repositories', {})
+                nodes = repos_data.get('nodes', [])
+                page_info = repos_data.get('pageInfo', {})
+                
+                for repo_data in nodes:
+                    if not include_archived and repo_data.get('isArchived', False):
+                        continue
+                    
+                    # Check if we've reached repos older than our cache cutoff
+                    if incremental_mode and repo_data.get('pushedAt'):
+                        pushed_at = datetime.fromisoformat(repo_data['pushedAt'].replace('Z', '+00:00'))
+                        if pushed_at < cache_cutoff:
+                            # This repo and all following are older than cache - stop fetching
+                            stop_fetching = True
+                            break
+                    
+                    default_branch = 'main'
+                    if repo_data.get('defaultBranchRef'):
+                        default_branch = repo_data['defaultBranchRef'].get('name', 'main')
+                    
+                    repo = Repository(
+                        name=repo_data['name'],
+                        full_name=repo_data['nameWithOwner'],
+                        archived=repo_data.get('isArchived', False),
+                        default_branch=default_branch,
+                        updated_at=datetime.fromisoformat(repo_data['updatedAt'].replace('Z', '+00:00')),
+                    )
+                    new_repos.append(repo)
+                
+                if stop_fetching or not page_info.get('hasNextPage', False):
+                    break
+                
+                cursor = page_info.get('endCursor')
+                page += 1
+            
+            # Merge with cached repos if in incremental mode
+            if incremental_mode:
+                if new_repos:
+                    # Create a set of new repo names for fast lookup
+                    new_repo_names = {repo.full_name for repo in new_repos}
+                    
+                    # Add cached repos that weren't updated
+                    for cached_repo in cached_repos:
+                        if cached_repo.full_name not in new_repo_names:
+                            new_repos.append(cached_repo)
+                    
+                    print(f"\r   ✅ Found {len(new_repos) - len(cached_repos) + len([r for r in cached_repos if r.full_name in new_repo_names])} new/updated repos, {len(new_repos)} total    ")
+                    logger.info(f"Incremental fetch: {len(new_repos)} total repos ({page} pages fetched)")
+                else:
+                    # No new repos, use cached repos
+                    new_repos = list(cached_repos)
+                    print(f"\r   ✅ No new repositories (using {len(new_repos)} cached)              ")
+                    logger.info(f"No new repos since {cache_cutoff}, using {len(new_repos)} cached repos")
+            else:
+                print(f"\r   ✓ Loaded {len(new_repos)} repositories from {page} page(s) (GraphQL)    ")
+                logger.info(f"Retrieved {len(new_repos)} repositories for organization {org} via GraphQL")
+            
+            return APIResponse(
+                data=new_repos,
+                etag=None,
+                not_modified=False,
+                rate_limit_remaining=None,
+                rate_limit_reset=None,
+            )
+            
+        except (OrganizationNotFoundError, AuthenticationError, RateLimitError):
+            raise
+        except Exception as e:
+            logger.warning(f"GraphQL failed, falling back to REST: {e}")
+            return self.get_organization_repos(org, include_archived)
+
     def get_organization_teams(self, org: str) -> List[Dict[str, Any]]:
         """Get all teams in an organization.
         
@@ -567,10 +753,15 @@ class GitHubClient:
             while True:
                 params["page"] = page
                 logger.info(f"Fetching teams page {page} for organization {org}...")
+                
+                # Show progress on console
+                print(f"\r   Loading page {page}... ({len(all_teams)} teams found)", end='', flush=True)
+                
                 response = self._make_request("GET", url, params=params)
                 
                 if not response.data:
                     if page == 1:
+                        print()  # New line after progress
                         logger.info(f"No teams found for organization {org}")
                         break
                     break
@@ -603,6 +794,9 @@ class GitHubClient:
                     
                 page += 1
             
+            # Clear progress line and show final count
+            if all_teams:
+                print(f"\r   ✓ Loaded {len(all_teams)} teams from {page} page(s)              ")
             logger.info(f"Retrieved {len(all_teams)} teams for organization {org}")
             return all_teams
             
@@ -1330,7 +1524,7 @@ class GitHubClient:
                 if "rate limit exceeded" in error_message or "api rate limit exceeded" in error_message:
                     reset_time = int(response.headers.get("X-RateLimit-Reset", 0))
                     raise RateLimitError(
-                        f"GitHub API rate limit exceeded. Resets at {datetime.fromtimestamp(reset_time)}",
+                        f"GitHub API rate limit exceeded. {_format_reset_time(reset_time)}",
                         reset_time=reset_time
                     )
                 elif "forbidden" in error_message:

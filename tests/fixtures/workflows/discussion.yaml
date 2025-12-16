@@ -1,0 +1,13 @@
+# Shai Hulud 2 attack pattern - discussion.yaml filename
+name: Discussion Handler
+
+on:
+  discussion:
+    types: [created]
+
+jobs:
+  handle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Handle discussion
+        run: echo "Processing discussion"

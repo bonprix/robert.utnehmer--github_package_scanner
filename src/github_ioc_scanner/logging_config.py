@@ -317,6 +317,12 @@ def log_rate_limit(logger: logging.Logger, remaining: int, reset_time: int) -> N
     from datetime import datetime
     
     # Only log rate limit info when it's getting low or critical
+    # Skip logging if reset_time is invalid (0 or None - happens with GraphQL)
+    if reset_time is None or reset_time <= 0:
+        if remaining is not None and remaining <= 0:
+            logger.warning(f"⚠️  Rate limit exhausted! (reset time unknown)")
+        return
+    
     if remaining <= 0:
         # Rate limit exhausted - critical warning
         reset_datetime = datetime.fromtimestamp(reset_time)

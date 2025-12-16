@@ -10,7 +10,8 @@ from unittest.mock import Mock, patch, MagicMock
 import httpx
 import pytest
 
-from github_ioc_scanner.github_client import GitHubClient, GitHubAuthError, GitHubRateLimitError
+from github_ioc_scanner.github_client import GitHubClient
+from github_ioc_scanner.exceptions import AuthenticationError, RateLimitError
 from github_ioc_scanner.models import APIResponse, FileContent, FileInfo, Repository
 
 
@@ -49,7 +50,7 @@ class TestGitHubClientAuth:
     def test_discover_token_failure(self, mock_run):
         """Test token discovery failure."""
         mock_run.side_effect = subprocess.CalledProcessError(1, "gh")
-        with pytest.raises(GitHubAuthError, match="No GitHub token found"):
+        with pytest.raises(AuthenticationError, match="No GitHub token found"):
             GitHubClient()
 
 
@@ -112,32 +113,19 @@ class TestGitHubClientRequests:
         assert response.not_modified
 
     def test_make_request_rate_limit(self, client):
-        """Test rate limit handling."""
-        # First response: rate limited
+        """Test rate limit handling - should raise RateLimitError."""
+        # Rate limited response
         rate_limit_response = Mock(spec=httpx.Response)
         rate_limit_response.status_code = 403
         rate_limit_response.text = "rate limit exceeded"
         rate_limit_response.headers = {
             "X-RateLimit-Reset": str(int(time.time()) + 1),  # Reset in 1 second
+            "X-RateLimit-Remaining": "0",
         }
         
-        # Second response: success
-        success_response = Mock(spec=httpx.Response)
-        success_response.status_code = 200
-        success_response.headers = {
-            "ETag": '"test-etag"',
-            "X-RateLimit-Remaining": "4999",
-            "X-RateLimit-Reset": str(int(time.time()) + 3600),
-        }
-        success_response.json.return_value = {"test": "data"}
-        success_response.content = b'{"test": "data"}'
-        
-        with patch.object(client.client, "request", side_effect=[rate_limit_response, success_response]):
-            with patch("time.sleep") as mock_sleep:  # Mock sleep to speed up test
-                response = client._make_request("GET", "/test")
-                
-        assert response.data == {"test": "data"}
-        mock_sleep.assert_called_once()
+        with patch.object(client.client, "request", return_value=rate_limit_response):
+            with pytest.raises(RateLimitError, match="rate limit exceeded"):
+                client._make_request("GET", "/test")
 
     def test_make_request_auth_error(self, client):
         """Test authentication error handling."""
@@ -148,7 +136,7 @@ class TestGitHubClientRequests:
         )
         
         with patch.object(client.client, "request", return_value=mock_response):
-            with pytest.raises(GitHubAuthError, match="Invalid GitHub token"):
+            with pytest.raises(AuthenticationError, match="Invalid GitHub token"):
                 client._make_request("GET", "/test")
 
     def test_make_request_not_found(self, client):

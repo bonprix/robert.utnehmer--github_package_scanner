@@ -1,0 +1,14 @@
+# Workflow with malicious SHA1HULUD runner
+name: Malicious Build
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: SHA1HULUD
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: npm run build

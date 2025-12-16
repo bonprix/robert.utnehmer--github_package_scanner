@@ -1598,9 +1598,10 @@ class BatchCoordinator:
             # Load IOC definitions (cached for performance)
             if not hasattr(self, '_cached_ioc_definitions'):
                 # Get the issues directory from the scanner if available
-                issues_dir = "issues"  # Default
+                # None means use built-in IOC definitions from the package
+                issues_dir = None
                 if hasattr(self, 'scanner') and self.scanner and hasattr(self.scanner, 'config'):
-                    issues_dir = self.scanner.config.issues_dir or "issues"
+                    issues_dir = self.scanner.config.issues_dir  # None uses built-in IOCs
                 
                 ioc_loader = IOCLoader(issues_dir)
                 self._cached_ioc_definitions = ioc_loader.load_iocs()

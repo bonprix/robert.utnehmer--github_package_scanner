@@ -90,7 +90,7 @@ class TestBatchIntegrationWorkflows:
             raise RepositoryNotFoundError(f"Repository {full_name} not found")
         
         async def mock_get_organization_repositories(org):
-            return [repo for repo in mock_repos.values() if repo.owner == org]
+            return [repo for repo in mock_repos.values() if repo.full_name.split('/')[0] == org]
         
         async def mock_get_file_content(repo, path):
             if path in mock_file_contents:
@@ -168,7 +168,7 @@ class TestBatchIntegrationWorkflows:
             assert 'content' in files_data[file_path]
         
         # Get batch metrics
-        metrics = coordinator.get_batch_metrics()
+        metrics = await coordinator.get_batch_metrics()
         assert metrics.total_requests > 0
         assert metrics.successful_requests > 0
         assert metrics.parallel_efficiency > 0
@@ -358,7 +358,7 @@ class TestBatchIntegrationWorkflows:
             assert repo.full_name in results
         
         # Get metrics to verify cross-repo optimization was attempted
-        metrics = coordinator.get_batch_metrics()
+        metrics = await coordinator.get_batch_metrics()
         assert metrics.total_requests > 0
 
     @pytest.mark.asyncio
@@ -568,6 +568,6 @@ class TestBatchIntegrationWorkflows:
         assert len(results) > 0
         
         # Verify metrics were collected
-        metrics = coordinator.get_batch_metrics()
+        metrics = await coordinator.get_batch_metrics()
         assert metrics.total_requests > 0
         assert metrics.successful_requests >= 0

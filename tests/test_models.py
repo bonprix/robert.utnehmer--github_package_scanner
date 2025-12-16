@@ -25,7 +25,7 @@ def test_scan_config_defaults():
     assert config.repo is None
     assert config.fast_mode is False
     assert config.include_archived is False
-    assert config.issues_dir == "issues"
+    assert config.issues_dir is None  # Default is None, not "issues"
 
 
 def test_scan_config_custom():
